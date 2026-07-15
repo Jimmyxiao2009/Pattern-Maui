@@ -1,11 +1,11 @@
 <script lang="ts">
   import {onMount} from 'svelte';
-  import {Moon, Sun, Save} from 'lucide-svelte';
+  import {Save} from 'lucide-svelte';
   import PageHeader from './PageHeader.svelte';
   import SettingRow from './SettingRow.svelte';
   import Toggle from './Toggle.svelte';
   import UsageCard from './UsageCard.svelte';
-  import type {Persona, SlotBindings} from './types';
+  import type {Persona, SlotBindings, Theme} from './types';
   import {runtime} from './runtime';
 
   let {
@@ -16,8 +16,8 @@
     onPersonaChange,
   }: {
     persona: Persona | null;
-    theme: 'night' | 'day';
-    onTheme: (value: 'night' | 'day') => void;
+    theme: Theme;
+    onTheme: (value: Theme) => void;
     onRedefine: () => void;
     onPersonaChange: (persona: Persona) => void;
   } = $props();
@@ -73,6 +73,13 @@
   let availableModels = $state<string[]>(['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.4-nano']);
   let modelCatalogSource = $state<'provider' | 'preset'>('preset');
   const isDemo = new URLSearchParams(location.search).has('demo');
+  const themes: Array<{id: Theme; label: string; detail: string}> = [
+    {id: 'night', label: '夜幕', detail: '暖金暗色'},
+    {id: 'day', label: '晨光', detail: '柔和明亮'},
+    {id: 'ocean', label: '海湾', detail: '深蓝青色'},
+    {id: 'forest', label: '森林', detail: '墨绿薄荷'},
+    {id: 'paper', label: '纸张', detail: '暖白棕色'},
+  ];
 
   const tabs = [
     ['general', '常规'],
@@ -415,10 +422,14 @@ async function activatePersonaCard(card: Persona) {
     <div class="settings-panel">
       {#if tab === 'general'}
         <h2>外观</h2>
-        <SettingRow title="主题" desc="切换界面的明暗外观">
-          <div class="segmented">
-            <button class:active={theme === 'night'} onclick={() => onTheme('night')}><Moon size={13} />夜</button>
-            <button class:active={theme === 'day'} onclick={() => onTheme('day')}><Sun size={13} />昼</button>
+        <SettingRow title="主题" desc="选择一套贯穿聊天、任务和快捷窗的配色">
+          <div class="theme-picker" role="group" aria-label="主题选择">
+            {#each themes as item}
+              <button class:active={theme === item.id} class="theme-option" onclick={() => onTheme(item.id)} aria-label={item.label}>
+                <span class={`theme-swatch ${item.id}`}></span>
+                <span><strong>{item.label}</strong><small>{item.detail}</small></span>
+              </button>
+            {/each}
           </div>
         </SettingRow>
         <h2>常驻行为</h2>

@@ -17,7 +17,7 @@
   import RecentsSidebar from './lib/RecentsSidebar.svelte';
   import ProjectWorkspace from './lib/ProjectWorkspace.svelte';
   import MessageContent from './lib/MessageContent.svelte';
-  import type {ChatMessage, Conversation, FileNode, MemoryCategory, MemoryItem, ModelSetup, Persona, Project, ViewId} from './lib/types';
+  import type {ChatMessage, Conversation, FileNode, MemoryCategory, MemoryItem, ModelSetup, Persona, Project, Theme, ViewId} from './lib/types';
   import {categoryFromWire, categoryToWire, importanceStars, normalizeConversation, normalizeProject} from './lib/types';
   import {formatRuntimeError, runtime} from './lib/runtime';
   import {routeUserMessage, shouldTransferToExecutor, taskTitleFromText} from '@pattern/core';
@@ -53,7 +53,7 @@
   let stream = $state<HTMLDivElement>();
   let query = $state('');
   let category = $state<'all' | MemoryCategory>('all');
-  let theme = $state<'night' | 'day'>('night');
+  let theme = $state<Theme>('night');
   let toast = $state('');
   let runtimeConnected = $state(false);
   let memoryItems = $state<MemoryItem[]>([]);
@@ -663,7 +663,8 @@
     if (!persona && saved) persona = JSON.parse(saved);
     else if (!persona && isDemo)
       persona = {name: 'Pattern', userName: '你', description: '说话直接，但知道分寸。', proactive: 'free'};
-    theme = (localStorage.getItem('pattern-theme') as 'night' | 'day') || 'night';
+    const storedTheme = localStorage.getItem('pattern-theme') as Theme | null;
+    theme = storedTheme && ['night', 'day', 'ocean', 'forest', 'paper'].includes(storedTheme) ? storedTheme : 'night';
     document.documentElement.dataset.theme = theme;
     if (activeProject) void loadDirectoryTree(activeProject.path);
     if (isDemo) {
@@ -714,7 +715,7 @@
     notify(`${value.name} 已启用`);
   }
 
-  function setTheme(value: 'night' | 'day') {
+  function setTheme(value: Theme) {
     theme = value;
     document.documentElement.dataset.theme = value;
     localStorage.setItem('pattern-theme', value);
