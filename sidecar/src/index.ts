@@ -1219,7 +1219,7 @@ async function handleRelayEnvelope(env: {id:string;from:string;role:string;type:
   if (!text) return;
   if ((await classifyRoute(text)).slot === 'executor') {
           const task = await createTaskFromText(taskTitleFromText(text), text, scheduleFromText(text));
-    await relay.publish(relay.createEnvelope({role:'companion', type:'chat', body:`已转交执行槽：${task.title}。状态会同步到任务页。`}));
+    await relay.publish(relay.createEnvelope({role:'companion', type:'chat', body:`已交给子代理：${task.title}。结果会同步到任务页。`}));
     return;
   }
   const reply = await companionReply(text);
