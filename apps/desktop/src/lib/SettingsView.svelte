@@ -1,6 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
-  import {Save} from 'lucide-svelte';
+  import {Download,Plus,Save} from 'lucide-svelte';
   import PageHeader from './PageHeader.svelte';
   import SettingRow from './SettingRow.svelte';
   import Toggle from './Toggle.svelte';
@@ -18,7 +18,7 @@
     persona: Persona | null;
     theme: Theme;
     onTheme: (value: Theme) => void;
-    onRedefine: () => void;
+    onRedefine: (mode?: 'redefine' | 'new') => void;
     onPersonaChange: (persona: Persona) => void;
   } = $props();
 
@@ -90,6 +90,41 @@
     ['privacy', '隐私与权限'],
     ['shortcuts', '快捷键'],
   ] as const;
+
+  $effect(() => {
+    if (!persona) return;
+    const index = personaCards.findIndex((card) => card.name === persona.name);
+    if (index < 0) personaCards = [persona, ...personaCards];
+    else if (JSON.stringify(personaCards[index]) !== JSON.stringify(persona)) {
+      personaCards = personaCards.map((card, itemIndex) => itemIndex === index ? persona : card);
+    }
+  });
+
+  function personaCardMarkdown(card: Persona) {
+    return `---\nname: ${card.name}\nuser_name: ${card.userName}\nproactive: ${card.proactive}\n---\n\n${card.description}\n`;
+  }
+
+  function downloadFile(filename: string, content: string, type: string) {
+    const blob = new Blob([content], {type});
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function exportPersonaCard(card: Persona | null = persona) {
+    if (!card) { saved = '还没有可导出的人格卡'; return; }
+    downloadFile(`${card.name || 'persona'}.md`, personaCardMarkdown(card), 'text/markdown;charset=utf-8');
+    saved = `已导出「${card.name}」`;
+  }
+
+  function exportAllPersonaCards() {
+    if (!personaCards.length) { saved = '还没有人格卡可导出'; return; }
+    downloadFile('pattern-persona-cards.json', JSON.stringify(personaCards, null, 2), 'application/json;charset=utf-8');
+    saved = `已导出 ${personaCards.length} 张人格卡`;
+  }
 
   function persistProfiles() { localStorage.setItem('pattern-model-profiles', JSON.stringify({activeProfileId, profiles})); }
   function snapshotProfile(): ModelProfile { return {id:activeProfileId, name: profiles.find((item)=>item.id===activeProfileId)?.name || `${provider} · ${model}`, provider, endpoint, model, executorProvider, executorEndpoint, executorModel, executorVision}; }
@@ -453,24 +488,28 @@ async function activatePersonaCard(card: Persona) {
       {:else if tab === 'persona'}
         <h2>当前人格</h2>
         <SettingRow title={persona?.name || '未定义'} desc={persona?.description || '尚未完成人格定义'}>
-          <button class="quiet-button" onclick={onRedefine}>重新定义</button>
+          <button class="quiet-button" onclick={() => onRedefine('redefine')}>重新定义</button>
         </SettingRow>
         <h2>Agent 角色</h2>
         <SettingRow title="主 Agent" desc={`${persona?.name || '当前人格'} · 统一承载聊天、记忆、主动消息和工作决策`}><span class="badge green">当前</span></SettingRow>
         <SettingRow title="子代理" desc="只有明确要求执行时才派生；独立处理 Computer Use，完成后只回传结果摘要"><span class="badge amber">按需启动</span></SettingRow>
         <p class="settings-note">主 Agent 与子代理共享人格和必要上下文，但子代理的执行细节不会污染主对话。</p>
-        <h2>人格卡</h2>
-        {#each personaCards as card}
-          <SettingRow title={card.name} desc={card.description}>
-            {#if persona?.name === card.name}
-              <span class="badge green">当前</span>
-            {:else}
-              <button class="quiet-button" onclick={() => activatePersonaCard(card)}>切换</button>
-            {/if}
-          </SettingRow>
+        <div class="persona-section-heading"><div><h2>人格卡槽</h2><p class="settings-note">保存多套人格，聊天和主动消息始终使用当前卡槽。</p></div><div class="persona-card-actions"><button class="quiet-button" onclick={() => onRedefine('new')}><Plus size={14}/>新增卡槽</button><button class="quiet-button" onclick={() => exportAllPersonaCards()} disabled={!personaCards.length}><Download size={14}/>导出全部</button></div></div>
+        {#if saved}<p class="save-result persona-save-result">{saved}</p>{/if}
+        {#if personaCards.length}
+          <div class="persona-slot-grid">
+            {#each personaCards as card, index (card.name)}
+              <article class:active={persona?.name === card.name} class="persona-slot-card">
+                <div class="persona-slot-top"><span class="persona-slot-index">0{index + 1}</span>{#if persona?.name === card.name}<span class="badge green">当前</span>{/if}</div>
+                <h3>{card.name}</h3>
+                <p>{card.description || '未填写描述'}</p>
+                <footer><span>{card.proactive === 'quiet' ? '安静主动性' : '自由主动性'}</span><div><button class="text-action" onclick={() => exportPersonaCard(card)}><Download size={13}/>导出</button>{#if persona?.name !== card.name}<button class="quiet-button" onclick={() => activatePersonaCard(card)}>切换</button>{/if}</div></footer>
+              </article>
+            {/each}
+          </div>
         {:else}
-          <p class="settings-note">还没有人格卡。可以重新定义创建新的人格。</p>
-        {/each}
+          <div class="persona-slot-empty"><strong>还没有人格卡槽</strong><span>创建第一张卡，之后可以随时切换。</span><button class="primary-button" onclick={() => onRedefine('new')}><Plus size={14}/>创建人格卡</button></div>
+        {/if}
       {:else if tab === 'model'}
         <div class="model-subtabs" role="tablist" aria-label="模型设置">
           <button class:active={modelPanel === 'usage'} role="tab" aria-selected={modelPanel === 'usage'} onclick={() => (modelPanel = 'usage')}>使用</button>

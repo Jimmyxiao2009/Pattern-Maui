@@ -85,6 +85,7 @@
   let projectDiff = $state<{status: string; diff: string} | null>(null);
   let clock = $state(Date.now());
   let redefiningPersona = $state(false);
+  let personaEditorMode = $state<'redefine' | 'new'>('redefine');
 
   const activeConversation = $derived(conversations.find((item) => item.id === activeConversationId) || null);
   const activeProject = $derived(projects.find((item) => item.id === activeProjectId) || null);
@@ -1175,7 +1176,7 @@
   <ReviewWindow />
 {:else}
   {#if ready && !persona}<Oobe onComplete={savePersona} />{/if}
-  {#if ready && redefiningPersona}<Oobe mode="redefine" initialPersona={persona} onComplete={savePersona} onCancel={() => (redefiningPersona = false)} />{/if}
+  {#if ready && redefiningPersona}<Oobe mode={personaEditorMode} initialPersona={personaEditorMode === 'redefine' ? persona : null} onComplete={savePersona} onCancel={() => (redefiningPersona = false)} />{/if}
   <main class="app-shell" inert={ready && !persona} aria-hidden={ready && !persona ? 'true' : undefined}>
     <header class="titlebar" data-tauri-drag-region>
       <div class="brand">
@@ -1410,7 +1411,7 @@
       {:else if activeView === 'channels'}
         <ChannelsView {notify} />
       {:else}
-        <SettingsView {persona} {theme} onTheme={setTheme} onRedefine={() => { redefiningPersona = true; }} onPersonaChange={(value) => { persona = value; localStorage.setItem('pattern-persona', JSON.stringify(value)); notify(`已切换为 ${value.name}`); }} />
+        <SettingsView {persona} {theme} onTheme={setTheme} onRedefine={(mode = 'redefine') => { personaEditorMode = mode; redefiningPersona = true; }} onPersonaChange={(value) => { persona = value; localStorage.setItem('pattern-persona', JSON.stringify(value)); notify(`已切换为 ${value.name}`); }} />
       {/if}
     </div>
     <footer class="statusbar">
