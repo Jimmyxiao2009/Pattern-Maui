@@ -27,7 +27,7 @@
     {id: 'conversations', label: '管理', icon: MessagesSquare},
     {id: 'memory', label: '记忆', icon: Layers3},
     {id: 'tasks', label: '定时', icon: Zap},
-    {id: 'workflows', label: '工作流', icon: Workflow},
+    {id: 'workflows', label: '技能', icon: Workflow},
     {id: 'mcp', label: '工具', icon: Wrench},
     {id: 'channels', label: '通道', icon: Send},
     {id: 'settings', label: '设置', icon: Settings},

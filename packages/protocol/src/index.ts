@@ -163,6 +163,8 @@ export interface TaskRecord {
   error?: string;
   /** Local schedules are persisted and run through the normal approval pipeline. */
   schedule?: TaskSchedule;
+  /** Optional user-authored ordered automation steps for scheduled runs. */
+  plan?: TaskPlanStep[];
   runCount?: number;
   lastRunAt?: number;
   nextRunAt?: number;
@@ -170,6 +172,13 @@ export interface TaskRecord {
   activeRunId?: string;
   workflow?: {id: string; name: string; stepCount: number; currentStep?: number; workspace?: string; agents?: number};
   agentResults?: Array<{skillId:string; output:string; status:'done'|'failed'; ts:number}>;
+}
+
+export interface TaskPlanStep {
+  id: string;
+  title: string;
+  detail: string;
+  enabled: boolean;
 }
 
 export interface TaskSchedule {
@@ -333,8 +342,8 @@ export type ClientMessage =
   | { type: 'relay.status'; id: string }
   | { type: 'relay.syncNow'; id: string }
   | { type: 'task.list'; id: string }
-  | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule }
-  | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule }
+  | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule; plan?: TaskPlanStep[] }
+  | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule; plan?: TaskPlanStep[] }
   | { type: 'task.control'; id: string; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject' }
   | { type: 'task.delete'; id: string; taskId: string }
   | { type: 'model.metrics.get'; id: string }

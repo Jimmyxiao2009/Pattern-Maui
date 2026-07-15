@@ -22,6 +22,9 @@
   let scheduleDays = $state<number[]>([1]);
   let intervalMinutes = $state(60);
   let onceAt = $state('');
+  let planSteps = $state<Array<{id:string; title:string; detail:string; enabled:boolean}>>([]);
+  let stepTitle = $state('');
+  let stepDetail = $state('');
   let error = $state('');
   let consumedDraft = $state<number | null>(null);
   const scheduledTasks = $derived(tasks.filter((task) => !!task.schedule));
@@ -70,24 +73,31 @@
     }
     const wasEditing = !!editingTask;
     if (editingTask) {
-      const response = await runtime.request<any>({type:'task.update', id:crypto.randomUUID(), taskId:editingTask.id, title:title.trim(), detail:detail.trim(), schedule});
+      const response = await runtime.request<any>({type:'task.update', id:crypto.randomUUID(), taskId:editingTask.id, title:title.trim(), detail:detail.trim(), schedule, plan:planSteps});
       if (response.type === 'error') { error = response.message; return; }
-    } else await runtime.request({type:'task.create', id:crypto.randomUUID(), title:title.trim(), detail:detail.trim(), schedule});
+    } else await runtime.request({type:'task.create', id:crypto.randomUUID(), title:title.trim(), detail:detail.trim(), schedule, plan:planSteps});
     creating = false;
     editingTask = null;
     title = '';
     detail = '';
+    planSteps = [];
     await refresh();
     notify(wasEditing ? '定时任务已更新' : `已创建${scheduleLabel(schedule)}定时任务`);
   }
 
   function openCreate() {
-    editingTask = null; title = ''; detail = ''; recurring = true; error = ''; scheduleKind = 'daily'; scheduleTime = '09:00'; scheduleDays = [1]; intervalMinutes = 60; onceAt = ''; creating = true;
+    editingTask = null; title = ''; detail = ''; planSteps = []; stepTitle = ''; stepDetail = ''; recurring = true; error = ''; scheduleKind = 'daily'; scheduleTime = '09:00'; scheduleDays = [1]; intervalMinutes = 60; onceAt = ''; creating = true;
   }
   function openEdit(task: TaskItem) {
     const schedule = task.schedule;
     if (!schedule) return;
-    editingTask = task; title = task.title; detail = task.detail || ''; recurring = true; scheduleKind = schedule.kind; scheduleTime = schedule.time || '09:00'; scheduleDays = schedule.days || [1]; intervalMinutes = schedule.intervalMinutes || 60; onceAt = schedule.at ? new Date(schedule.at).toISOString().slice(0,16) : ''; error = ''; creating = true;
+    editingTask = task; title = task.title; detail = task.detail || ''; planSteps = (task.plan || []).map((step) => ({...step})); stepTitle = ''; stepDetail = ''; recurring = true; scheduleKind = schedule.kind; scheduleTime = schedule.time || '09:00'; scheduleDays = schedule.days || [1]; intervalMinutes = schedule.intervalMinutes || 60; onceAt = schedule.at ? new Date(schedule.at).toISOString().slice(0,16) : ''; error = ''; creating = true;
+  }
+
+  function addPlanStep() {
+    if (!stepTitle.trim() || !stepDetail.trim()) { error = '请填写步骤名称和操作说明'; return; }
+    planSteps = [...planSteps, {id:crypto.randomUUID(), title:stepTitle.trim(), detail:stepDetail.trim(), enabled:true}];
+    stepTitle = ''; stepDetail = ''; error = '';
   }
 
   function buildSchedule(): TaskItem['schedule'] | undefined {
@@ -162,6 +172,7 @@
           <h3>{task.title}</h3>
           {#if task.detail}<p>{task.detail}</p>{/if}
           {#if task.schedule}<p>↻ {scheduleLabel(task.schedule)} 自动执行 · 已运行 {task.runCount || 0} 次</p>{/if}
+          {#if task.plan?.length}<p>☷ {task.plan.length} 个自动化步骤：{task.plan.map((step) => step.title).join(' → ')}</p>{/if}
           {#if task.workflow}<p>⚙ {task.workflow.name} · {task.workflow.agents || task.workflow.stepCount} 个 Agent · {task.workflow.workspace || '当前工作区'}</p>{/if}
           {#if task.agentResults?.length}<details class="task-runs"><summary>子 Agent 结果（{task.agentResults.length}）</summary>{#each task.agentResults as result}<p><b>{result.skillId}</b> · {result.status} · {result.output.slice(0,240)}</p>{/each}</details>{/if}
           {#if task.runs?.length}<details class="task-runs"><summary>运行记录（{task.runs.length}）</summary>{#each task.runs.slice(0,5) as run}<p>{new Date(run.startedAt).toLocaleString('zh-CN')} · {run.status}{run.error ? ` · ${run.error}` : ''}</p>{/each}</details>{/if}
@@ -208,6 +219,13 @@
       </header>
       <label>任务名称<input bind:value={title} placeholder="例如：整理下载目录中的文件" /></label>
       <label>补充说明<textarea bind:value={detail} rows="4" placeholder="期望结果、限制或需要注意的事项"></textarea></label>
+      <div class="automation-steps">
+        <div class="setting-inline"><strong>自动化步骤（可选）</strong><span class="settings-note">按顺序执行，类似步骤记录器</span></div>
+        {#each planSteps as step, index (step.id)}
+          <div class="automation-step"><b>{index + 1}</b><span><strong>{step.title}</strong><small>{step.detail}</small></span><button type="button" aria-label={`删除步骤 ${index + 1}`} onclick={() => planSteps = planSteps.filter((item) => item.id !== step.id)}><X size={13} /></button></div>
+        {/each}
+        <div class="automation-step-form"><input aria-label="步骤名称" bind:value={stepTitle} placeholder="步骤名称，例如：打开邮件客户端" /><input aria-label="步骤说明" bind:value={stepDetail} placeholder="具体操作，例如：筛选今天未读邮件" /><button type="button" class="quiet-button" onclick={addPlanStep}><Plus size={13} />添加步骤</button></div>
+      </div>
       {#if recurring}
         <label>执行规则<select bind:value={scheduleKind}><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">按间隔</option><option value="once">仅一次</option></select></label>
         {#if scheduleKind === 'daily' || scheduleKind === 'weekly'}<label>执行时间<input type="time" bind:value={scheduleTime} /></label>{/if}

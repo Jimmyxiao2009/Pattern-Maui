@@ -969,7 +969,7 @@ function scheduleFromText(text: string): TaskSchedule | undefined {
   const every = text.match(/(?:每隔|每)\s*(\d+)\s*(?:分钟|分|minutes?)/i);
   return every ? {kind:'interval', intervalMinutes:Math.max(1, Number(every[1])), enabled:true} : undefined;
 }
-async function createTaskFromText(title: string, detail = '', schedule?: TaskSchedule, workflow?: TaskRecord['workflow']) {
+async function createTaskFromText(title: string, detail = '', schedule?: TaskSchedule, workflow?: TaskRecord['workflow'], plan?: TaskRecord['plan']) {
   const normalizedSchedule = schedule || scheduleFromText(`${title}\n${detail}`);
   const task: TaskRecord = {
     id: randomUUID(),
@@ -980,6 +980,7 @@ async function createTaskFromText(title: string, detail = '', schedule?: TaskSch
     steps: [],
     riskTier: classifyTaskTier(title, detail || title),
     schedule: normalizedSchedule,
+    plan: plan?.filter((step) => step?.title?.trim() && step?.detail?.trim()).slice(0, 30),
     nextRunAt: normalizedSchedule ? Date.now() : undefined,
     workflow,
   };
@@ -1778,7 +1779,7 @@ case 'journal.list': {
         break;
       }
       case 'task.create': {
-        const task = await createTaskFromText(message.title, message.detail || '', message.schedule);
+        const task = await createTaskFromText(message.title, message.detail || '', message.schedule, undefined, message.plan);
         send(socket, {type: 'task.list.result', id: message.id, tasks});
         // ensure caller still sees the created task via list result
         void task;
@@ -1791,6 +1792,7 @@ case 'journal.list': {
         task.title = message.title.trim().slice(0, 160) || task.title;
         task.detail = (message.detail || '').trim().slice(0, 8000);
         task.schedule = message.schedule;
+        task.plan = message.plan?.filter((step) => step?.title?.trim() && step?.detail?.trim()).slice(0, 30);
         task.schedule.enabled = true;
         task.status = 'scheduled';
         task.nextRunAt = nextScheduleAt(task.schedule);
@@ -1990,7 +1992,8 @@ async function decideComputerAction(task: TaskRecord, screenshotBase64: string, 
   const apiKey = executor?.apiKey || config.apiKey;
   const anthropic = provider.toLowerCase().includes('anthropic');
   const vision=config.executor?.vision!==false;
-  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
+  const plan = task.plan?.filter((step) => step.enabled).map((step, index) => `${index + 1}. ${step.title}: ${step.detail}`).join('\n') || '(no explicit step list; infer the task from its details)';
+  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nOrdered automation steps (follow in order; do not skip or reorder):\n${plan}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
   const userContent:any=vision?[{type:'text',text:instruction},{type:'image',source:{type:'base64',media_type:'image/png',data:screenshotBase64}}]:instruction;
   const openAiContent:any=vision?[{type:'text',text:instruction},{type:'image_url',image_url:{url:`data:image/png;base64,${screenshotBase64}`}}]:instruction;
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions', base), anthropic ? {

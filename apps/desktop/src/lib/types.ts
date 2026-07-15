@@ -74,6 +74,7 @@ export interface TaskItem {
   riskTier?: number;
   error?: string;
   schedule?: {kind: 'daily' | 'weekly' | 'interval' | 'once'; time?: string; days?: number[]; intervalMinutes?: number; at?: number; enabled: boolean};
+  plan?: Array<{id:string; title:string; detail:string; enabled:boolean}>;
   runCount?: number;
   lastRunAt?: number;
   nextRunAt?: number;

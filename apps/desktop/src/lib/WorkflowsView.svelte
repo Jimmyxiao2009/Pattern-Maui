@@ -147,20 +147,14 @@
 </script>
 
 <section class="view">
-  <PageHeader eyebrow="编码自动化" title="工作流与技能" subtitle="主模型负责拆解与汇总，低价模型负责执行子 Agent；可安装自定义技能扩展能力。">
+  <PageHeader eyebrow="Skills / 技能" title="技能" subtitle="技能是主 Agent 可以调用的能力说明；需要定时、多步执行时，请到定时任务里编排。">
     <button class="quiet-button" onclick={() => (installing = true)}><Plus size={14} />安装技能</button>
-    <span class="badge dim">支持串行、只读并行、平权研讨</span>
   </PageHeader>
   <div class="workflow-layout">
     <div class="workflow-list">
-      <h2>工作流</h2>
-      {#each workflows as workflow}
-        <button class:active={selected?.id === workflow.id} onclick={() => { selected = workflow; agentCount = workflow.maxAgents; }}>
-          <WorkflowIcon size={16} /><span><strong>{workflow.name}</strong><small>{workflow.description}</small></span><b>{workflow.maxAgents} Agent</b>
-        </button>
-      {:else}
-        <p class="settings-note">运行时未连接，暂时无法读取工作流。</p>
-      {/each}
+      <h2>使用方式</h2>
+      <p class="settings-note">在聊天中直接告诉主 Agent 目标；它会按需调用技能，必要时派生子代理。多步自动化和执行时间统一在“定时”页面管理。</p>
+      <div class="skill-usage-note"><WorkflowIcon size={17} /><strong>技能不等于工作流</strong><small>技能描述“怎么做”，定时任务描述“什么时候做”和“按哪些步骤做”。</small></div>
     </div>
     <div class="skill-list">
       <h2>技能库</h2>
