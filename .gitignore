@@ -1,0 +1,6 @@
+node_modules/
+dist/
+target/
+.svelte-kit/
+*.log
+.tools/

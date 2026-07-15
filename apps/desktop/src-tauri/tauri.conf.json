@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pattern",
+  "version": "0.3.0",
+  "identifier": "app.pattern.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm -w sidecar:build && pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm -w sidecar:build && pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pattern",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": false,
+        "center": true,
+        "resizable": true
+      },
+      {
+        "label": "quick",
+        "title": "Pattern Quick",
+        "url": "index.html?window=quick",
+        "width": 440,
+        "height": 390,
+        "minWidth": 380,
+        "minHeight": 260,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "review",
+        "title": "Pattern Review",
+        "url": "index.html?window=review",
+        "width": 960,
+        "height": 640,
+        "minWidth": 800,
+        "minHeight": 520,
+        "decorations": false,
+        "transparent": false,
+        "center": true,
+        "resizable": true,
+        "visible": false
+      }
+    ],
+    "security": {"csp": null}
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "Desktop AI companion",
+    "category": "Productivity",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
+  }
+}

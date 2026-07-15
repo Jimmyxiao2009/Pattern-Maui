@@ -1,0 +1,29 @@
+{
+  "name": "@pattern/sidecar",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --external:@huggingface/transformers --external:nodemailer --external:imapflow --external:mailparser --outfile=dist/index.cjs ",
+    "build:binary": "bun build src/index.ts --compile --outfile=dist/pattern-sidecar",
+    "test": "pnpm build && node --test test/runtime.test.mjs test/memory.test.mjs test/relay.test.mjs test/channels.test.mjs test/computer-use-text.test.mjs test/e2e.test.mjs test/extract.test.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@pattern/core": "workspace:*",
+    "@pattern/channels": "workspace:*",
+    "@pattern/memory": "workspace:*",
+    "@pattern/proactive": "workspace:*",
+    "@pattern/protocol": "workspace:*",
+    "@pattern/relay": "workspace:*",
+    "nodemailer": "^6.10.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/nodemailer": "^6.4.24",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

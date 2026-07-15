@@ -1,0 +1,47 @@
+:root { font-family: ui-sans-serif, system-ui, -apple-system, "Microsoft YaHei", sans-serif; color: #f4f0e8; background: #121216; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #121216; }
+main { min-height: 100dvh; display: grid; grid-template-rows: auto 1fr auto; max-width: 680px; margin: auto; background: #16161c; }
+header { display: flex; justify-content: space-between; align-items: center; padding: calc(env(safe-area-inset-top) + 15px) 18px 15px; border-bottom: 1px solid #2d2d35; }
+header div { display: flex; align-items: center; gap: 8px; }
+header small { color: #9997a1; }
+.eye { width: 11px; height: 11px; border-radius: 50%; background: #e7a332; box-shadow: 0 0 12px #e7a332; }
+button { border: 1px solid #373640; background: #22222a; color: #f4f0e8; border-radius: 10px; padding: 9px 12px; font: inherit; }
+.chat, .settings, .tasks { min-height: 0; display: flex; flex-direction: column; padding: 18px; }
+.chat-head { display: flex; justify-content: space-between; align-items: center; }
+.chat-head p, .settings > p { margin: 0; color: #e7a332; font-size: 12px; font-weight: 700; }
+.chat h1, .settings h1, .tasks h1 { margin: 4px 0 16px; font-size: 22px; }
+.chat-head span { display: flex; align-items: center; gap: 5px; color: #78d6a5; font-size: 12px; }
+.chat-head span.offline { color: #ec7972; }
+.stream { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 8px 0; }
+.stream article { max-width: 88%; padding: 10px 12px; border-radius: 12px; background: #22222a; }
+.stream article.user { align-self: flex-end; background: #3c2e1a; }
+.stream article.proactive { border-left: 2px solid #e7a332; }
+.stream small { color: #a09da8; font-size: 11px; }
+.stream p { margin: 5px 0 0; line-height: 1.55; white-space: pre-wrap; }
+.composer { display: flex; gap: 10px; padding-top: 12px; border-top: 1px solid #2d2d35; }
+.composer textarea { flex: 1; resize: none; background: #22222a; border: 1px solid #373640; border-radius: 10px; padding: 10px; color: inherit; font: inherit; }
+.composer button { display: grid; place-items: center; background: #e7a332; color: #1b1409; border: 0; }
+.settings { gap: 13px; overflow: auto; }
+.settings label, .task-create label, .pair-tools label { display: flex; flex-direction: column; gap: 5px; color: #b2afb9; font-size: 12px; }
+.settings input, .settings textarea, .task-create input, .task-create textarea { background: #22222a; color: inherit; border: 1px solid #373640; border-radius: 9px; padding: 10px; font: inherit; }
+.hint { color: #9b98a2; font-size: 12px; line-height: 1.6; }
+.error { color: #ec7972 !important; }
+.primary { background: #e7a332; color: #1b1409; border: 0; font-weight: 700; }
+.empty { margin: auto; color: #9b98a2; text-align: center; padding: 28px; }
+.empty.big { display: grid; place-items: center; gap: 10px; }
+.empty p { margin: 0; }
+.task-create, .pair-tools { display: grid; gap: 10px; padding: 14px; background: #202027; border: 1px solid #303039; border-radius: 12px; }
+.task-create button { display: flex; justify-content: center; align-items: center; gap: 6px; }
+.task-list { display: grid; gap: 10px; overflow: auto; padding-top: 14px; }
+.task-list article { padding: 12px; background: #22222a; border-radius: 11px; }
+.task-list article > div { display: flex; justify-content: space-between; gap: 10px; }
+.task-list span { color: #e7a332; font-size: 12px; }
+.task-list p { margin: 7px 0 0; color: #b2afb9; }
+.pair-tools { margin-top: 8px; }
+.scan-button { display: flex !important; flex-direction: row !important; align-items: center; justify-content: center; gap: 7px; padding: 10px; border: 1px solid #484650; border-radius: 9px; color: #f4f0e8 !important; }
+.scan-button input { display: none; }
+.request-qr { width: 280px; max-width: 100%; justify-self: center; border-radius: 12px; background: white; padding: 8px; }
+nav { display: grid; grid-template-columns: repeat(3, 1fr); padding: 8px 18px calc(env(safe-area-inset-bottom) + 8px); border-top: 1px solid #2d2d35; gap: 8px; }
+nav button { display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; background: transparent; color: #a09da8; }
+nav button.active { background: #342718; color: #e7a332; }

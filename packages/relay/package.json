@@ -1,0 +1,15 @@
+{
+  "name": "@pattern/relay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".":"./src/index.ts",
+    "./pairing":"./src/pairing.ts"
+  },
+  "dependencies": {
+    "@noble/ciphers":"^2.0.1",
+    "@noble/curves":"^2.0.1",
+    "@noble/hashes":"^2.0.1"
+  }
+}

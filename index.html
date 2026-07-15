@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="night">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>Pattern</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="titlebar">
+      <div class="brand"><span class="eye blink" aria-hidden="true"></span><strong>Pattern</strong><span id="view-title">对话</span></div>
+      <div class="window-actions" aria-label="窗口操作"><button title="最小化">−</button><button title="最大化">□</button><button class="close" title="关闭">×</button></div>
+    </header>
+
+    <div class="workspace">
+      <nav class="rail" aria-label="主导航">
+        <button class="nav-item active" data-view="chat" data-title="对话" title="对话"><span>◌</span><small>对话</small></button>
+        <button class="nav-item" data-view="memory" data-title="记忆" title="记忆"><span>◇</span><small>记忆</small></button>
+        <button class="nav-item" data-view="tasks" data-title="任务" title="任务"><span>ϟ</span><small>任务</small></button>
+        <button class="nav-item" data-view="channels" data-title="通道" title="通道"><span>↗</span><small>通道</small></button>
+        <div class="rail-spacer"></div>
+        <button class="nav-item" data-view="settings" data-title="设置" title="设置"><span>⚙</span><small>设置</small></button>
+      </nav>
+
+      <section class="view active" id="chat-view">
+        <div class="conversation-head">
+          <div><p class="eyebrow">陪伴槽</p><h1>今晚</h1></div>
+          <button class="quiet-button" id="new-chat">＋ 新对话</button>
+        </div>
+        <div class="chat-stream" id="chat-stream" aria-live="polite">
+          <div class="day-divider"><span>7 月 12 日 · 周日</span></div>
+          <article class="message assistant proactive">
+            <div class="message-meta"><span class="eye small"></span><strong>Pattern</strong><span class="badge amber">主动 · 日程</span><time>16:08</time></div>
+            <p>架构文档已经放了一个下午。先把 M0 的界面骨架搭起来，别等到晚上又说“明天再做”。</p>
+            <button class="reason-link">查看为什么开口</button>
+          </article>
+          <article class="message user"><p>行。先按设计稿把主界面做出来。</p><time>16:10</time></article>
+          <article class="message assistant">
+            <div class="message-meta"><span class="eye small"></span><strong>Pattern</strong><time>16:11</time></div>
+            <p>可以。先保住对话、记忆、任务和通道这四条主线。设置页只放真正影响常驻体验的开关，别一开始就堆满表单。</p>
+            <div class="memory-receipt"><span>✓</span> 已记住 · 偏好「先做核心流程」 <button>撤销</button></div>
+          </article>
+        </div>
+        <form class="composer" id="message-form">
+          <textarea id="message-input" rows="2" placeholder="和 Pattern 说点什么……" aria-label="消息"></textarea>
+          <div class="composer-actions">
+            <button type="button" class="text-action">⇧ 转交执行</button>
+            <button type="button" class="icon-action" title="添加文件">＋</button>
+            <span class="route-hint">陪伴槽</span>
+            <button type="submit" class="send-button" title="发送">↑</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="view" id="memory-view">
+        <div class="page-head"><div><p class="eyebrow">长期记忆</p><h1>记得的事</h1><p class="subtitle">每条记忆都可查看来源、修改或撤销。</p></div><button class="primary-button">＋ 添加记忆</button></div>
+        <div class="toolbar"><label class="search-box"><span>⌕</span><input id="memory-search" type="search" placeholder="搜索记忆"></label><div class="filters" id="memory-filters"><button class="active" data-filter="all">全部 <b>6</b></button><button data-filter="事实">事实</button><button data-filter="偏好">偏好</button><button data-filter="事件">事件</button><button data-filter="反馈">反馈</button></div></div>
+        <div class="consolidation"><span>✦</span><div><strong>昨夜已固化</strong><p>14 条对话流水整理为 3 条长期记忆，27 条低访问条目已衰减。</p></div><time>03:20</time></div>
+        <div class="memory-grid" id="memory-grid">
+          <article class="memory-card" data-category="事件"><div class="card-top"><span class="badge amber">事件</span><span class="importance">● ● ●</span></div><p>2026-07 搬家拉伤右臂，一周内避免提重物；已提醒冷敷和拉伸。</p><footer>昨天 · 访问 3 · 来源 #c412</footer></article>
+          <article class="memory-card" data-category="事实"><div class="card-top"><span class="badge blue">事实</span><span class="importance">● ● ○</span></div><p>养了一只黄眼睛的黑猫，晚上睡床头；猫粮放阳台储物柜第二层。</p><footer>2026-03 · 访问 41 · 来源 #c208</footer></article>
+          <article class="memory-card" data-category="反馈"><div class="card-top"><span class="badge green">反馈</span><span class="importance">● ● ●</span></div><p>深夜主动提醒有效，但同一件事当晚最多催一次。</p><footer>2026-05 · 访问 18 · 政策已应用</footer></article>
+          <article class="memory-card" data-category="偏好"><div class="card-top"><span class="badge dim">偏好</span><span class="importance">● ○ ○</span></div><p>写作时不要打断；连续工作超过 40 分钟才允许提醒。</p><footer>2026-04 · 访问 26</footer></article>
+          <article class="memory-card" data-category="事实"><div class="card-top"><span class="badge blue">事实</span><span class="importance">● ● ○</span></div><p>小说更新日是周三和周日；粉丝群服务运行在 fanwork-api。</p><footer>2026-02 · 访问 57</footer></article>
+          <article class="memory-card expired" data-category="事实"><div class="card-top"><span class="badge dim">事实 · 已取代</span></div><p>住在城中村老房子，楼道没有灯。</p><footer>已被「2026-07 搬家」取代</footer></article>
+        </div>
+        <div class="empty-state" id="memory-empty">没有找到匹配的记忆</div>
+      </section>
+
+      <section class="view" id="tasks-view">
+        <div class="page-head"><div><p class="eyebrow">执行槽</p><h1>正在做的事</h1><p class="subtitle">每一步都能追踪，危险动作必须由你确认。</p></div><button class="primary-button">＋ 新任务</button></div>
+        <div class="task-focus">
+          <div class="task-summary"><span class="eye active-eye"></span><div><span class="badge amber">执行中</span><h2>排查并恢复 fanwork-api</h2><p>已运行 01:42 · 步骤 4 / 5</p></div><div class="task-controls"><button>暂停</button><button class="danger-button">终止</button></div></div>
+          <div class="progress"><i style="width:72%"></i></div>
+          <ol class="steps"><li class="done"><b>✓</b><div>读取服务状态与日志<small>T0 只读 · 1.8s</small></div></li><li class="done"><b>✓</b><div>定位 OOM 记录<small>T0 只读 · 发现内存峰值 1.9 GB</small></div></li><li class="done"><b>✓</b><div>重启服务并验证心跳<small>T1 可逆 · 已恢复</small></div></li><li class="waiting"><b>!</b><div>清理 1.2 GB 旧日志<small>T2 破坏性 · 等待你的确认</small><div class="inline-actions"><button class="primary-button">允许这一次</button><button>拒绝</button></div></div></li><li><b>5</b><div>生成任务报告<small>等待执行</small></div></li></ol>
+        </div>
+      </section>
+
+      <section class="view" id="channels-view">
+        <div class="page-head"><div><p class="eyebrow">消息中继</p><h1>通道</h1><p class="subtitle">在电脑之外，也能收到消息和下达任务。</p></div><button class="primary-button">＋ 添加通道</button></div>
+        <div class="channel-list">
+          <article><div class="channel-icon">▣</div><div><h3>系统通知</h3><p>本机主动提醒与任务结果</p></div><span class="status online">已连接</span><label class="switch"><input type="checkbox" checked><i></i></label></article>
+          <article><div class="channel-icon">⌁</div><div><h3>Pattern Mobile</h3><p>WebDAV 端到端加密中继 · 上次同步 12 秒前</p></div><span class="status online">已连接</span><button class="quiet-button">管理设备</button></article>
+          <article><div class="channel-icon">↗</div><div><h3>Telegram</h3><p>备用远程消息通道</p></div><span class="status">未配置</span><button class="quiet-button">配置</button></article>
+          <article><div class="channel-icon">＠</div><div><h3>邮件</h3><p>日报与低频正式消息</p></div><span class="status">未配置</span><button class="quiet-button">配置</button></article>
+        </div>
+      </section>
+
+      <section class="view" id="settings-view">
+        <div class="page-head"><div><p class="eyebrow">Pattern</p><h1>设置</h1><p class="subtitle">控制人格、模型与常驻行为。</p></div></div>
+        <div class="settings-layout"><aside><button class="active">常规</button><button>人格与角色</button><button>模型</button><button>隐私与权限</button><button>快捷键</button></aside><div class="settings-panel">
+          <section><h2>外观</h2><div class="setting-row"><div><strong>主题</strong><p>切换界面的明暗外观</p></div><div class="segmented" id="theme-toggle"><button data-theme="night" class="active">夜</button><button data-theme="day">昼</button></div></div></section>
+          <section><h2>常驻行为</h2><div class="setting-row"><div><strong>主动开口</strong><p>允许 Pattern 根据时间与事件主动联系你</p></div><label class="switch"><input type="checkbox" checked><i></i></label></div><div class="setting-row"><div><strong>失焦时隐藏快捷窗</strong><p>关闭后，快捷窗会一直留在最前面</p></div><label class="switch"><input type="checkbox"><i></i></label></div><div class="setting-row"><div><strong>开机启动</strong><p>登录系统后在托盘静默启动</p></div><label class="switch"><input type="checkbox" checked><i></i></label></div></section>
+          <section><h2>状态</h2><div class="setting-row"><div><strong>陪伴人格</strong><p>Pattern · companion: claude-sonnet-5</p></div><button class="quiet-button">管理</button></div></section>
+        </div></div>
+      </section>
+    </div>
+
+    <footer class="statusbar"><span><span class="eye tiny blink"></span> 空闲</span><span>今日主动 <code>7</code> 次</span><span>记忆 <code>4,382</code> 条</span><span class="status-spacer"></span><code>companion · claude-sonnet-5</code></footer>
+  </main>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "@pattern/channels",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "imapflow": "^1.0.195",
+    "mailparser": "^3.7.4",
+    "nodemailer": "^6.10.1"
+  }
+}

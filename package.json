@@ -1,0 +1,24 @@
+{
+  "name": "pattern",
+  "private": true,
+  "version": "0.3.0",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "build": "pnpm --dir apps/desktop build",
+    "check": "pnpm --dir apps/desktop check",
+    "tauri": "pnpm --dir apps/desktop tauri",
+    "mobile:dev": "pnpm --dir apps/mobile dev",
+    "mobile:build": "pnpm --dir apps/mobile build",
+    "mobile:check": "pnpm --dir apps/mobile check",
+    "mobile:android:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1",
+    "sidecar:build": "pnpm --dir sidecar build",
+    "sidecar:binary": "pnpm --dir sidecar build:binary",
+    "build:all": "pnpm sidecar:build && pnpm build",
+    "test": "pnpm --dir sidecar test && pnpm check && pnpm mobile:check",
+    "test:ui": "node tests/run-ui.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.61.1"
+  }
+}
