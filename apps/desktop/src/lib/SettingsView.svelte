@@ -23,6 +23,7 @@
   } = $props();
 
   let tab = $state<'general' | 'persona' | 'model' | 'privacy' | 'shortcuts' | 'proactive' | 'filewatch' | 'journal'>('general');
+  let modelPanel = $state<'usage' | 'connections'>('usage');
   let provider = $state('OpenAI Compatible');
   let endpoint = $state('https://api.openai.com/v1');
   let model = $state('gpt-4.1-mini');
@@ -106,6 +107,7 @@
     if(key.includes('智谱') || key.includes('zhipu')) return ['glm-5.1','glm-5v-turbo','glm-4.7'];
     return ['gpt-5.6','gpt-5.6-terra','gpt-5.6-luna','gpt-5.5','gpt-5.5-pro','gpt-5.4','gpt-5.4-pro','gpt-5.4-mini','gpt-5.4-nano'];
   }
+  function modelChoices(current = '') { return Array.from(new Set([current, ...availableModels].filter(Boolean))); }
   async function refreshModelCatalog() {
     availableModels = presetForProvider(provider); modelCatalogSource = 'preset';
     try {
@@ -269,6 +271,11 @@
       return;
     }
     try {
+      // Roles select a model from the active connection; credentials and endpoints are maintained once.
+      agentProvider = provider;
+      agentEndpoint = endpoint;
+      executorProvider = provider;
+      executorEndpoint = endpoint;
       syncActiveProfile();
       const {invoke} = await import('@tauri-apps/api/core');
       await invoke('save_model_config', {
@@ -455,63 +462,46 @@ async function activatePersonaCard(card: Persona) {
           <p class="settings-note">还没有人格卡。可以重新定义创建新的人格。</p>
         {/each}
       {:else if tab === 'model'}
-        <h2>快速切换</h2>
-        <p class="settings-note">配置档按服务商独立保存；密钥始终留在系统凭据库。切换会立即重配运行时。</p>
-        <div class="model-profiles">
-          {#each profiles as profile}
-            <button class:active={profile.id === activeProfileId} onclick={() => activateProfile(profile.id)}>
-              <strong>{profile.name}</strong><span>{profile.provider} · {profile.model}</span>
-            </button>
-          {/each}
-          <button class="add-profile" onclick={addProfile}>＋ 添加服务商 / 模型</button>
+        <div class="model-subtabs" role="tablist" aria-label="模型设置">
+          <button class:active={modelPanel === 'usage'} role="tab" aria-selected={modelPanel === 'usage'} onclick={() => (modelPanel = 'usage')}>使用</button>
+          <button class:active={modelPanel === 'connections'} role="tab" aria-selected={modelPanel === 'connections'} onclick={() => (modelPanel = 'connections')}>接入</button>
         </div>
-        <div class="settings-form compact-model-form">
-          <label>配置档名称<input value={profiles.find((item)=>item.id===activeProfileId)?.name || ''} oninput={(event) => { const name=(event.currentTarget as HTMLInputElement).value; profiles=profiles.map((item)=>item.id===activeProfileId ? {...item,name} : item); persistProfiles(); }} /></label>
-        </div>
-        <h2>主 Agent 模型</h2>
-        <div class="settings-form">
-          <label>服务商<select bind:value={provider} onchange={() => { availableModels=presetForProvider(provider); modelCatalogSource='preset'; }}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label>
-          <label>API 地址<input bind:value={endpoint} /></label>
-          <label>模型<input bind:value={model} list="available-models" /><small class="field-help">{modelCatalogSource === 'provider' ? '已从当前账号刷新可用模型' : '内置近期模型；保存后可按当前账号刷新'}</small></label>
-          <label>更新 API Key<input type="password" bind:value={apiKey} placeholder="留空则保持现有密钥" /></label>
-          <div>
-            <button class="quiet-button" onclick={refreshModelCatalog}>刷新可用模型</button>
+        {#if modelPanel === 'usage'}
+          <h2>使用模型</h2>
+          <p class="settings-note">这里维护“谁负责什么”，不用为主 Agent 和子代理重复填写地址、密钥。所有角色都从当前接入的模型列表中选择。</p>
+          <div class="model-usage-list">
+            <div class="model-usage-row"><div><strong>默认模型</strong><small>用于新对话、主 Agent 和最终回复</small></div><select bind:value={model}>{#each modelChoices(model) as item}<option value={item}>{item}</option>{/each}</select></div>
+            <div class="model-usage-row"><div><strong>独立规划模型</strong><small>用于拆解、路由和需要低成本判断的步骤</small></div><select bind:value={agentModel}><option value="">使用默认模型</option>{#each modelChoices(agentModel) as item}<option value={item}>{item}</option>{/each}</select></div>
+            <div class="model-usage-row"><div><strong>子代理模型</strong><small>明确要求干活时使用；留空则自动复用默认模型</small></div><select bind:value={executorModel}><option value="">使用默认模型</option>{#each modelChoices(executorModel) as item}<option value={item}>{item}</option>{/each}</select></div>
+            <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。"><Toggle checked={executorVision} onChange={(value)=>executorVision=value}/></SettingRow>
           </div>
-        </div>
-        <datalist id="available-models">{#each availableModels as item}<option value={item}></option>{/each}</datalist>
-        <h2>子 Agent 模型</h2>
-        <p class="settings-note">主模型负责拆解和最终汇总；子 Agent 默认使用更便宜、更快的模型。留空 API Key 会沿用当前配置档的主模型密钥。</p>
-        <div class="settings-form">
-          <label>服务商<select bind:value={agentProvider}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label>
-          <label>API 地址<input bind:value={agentEndpoint} /></label>
-          <label>模型<input bind:value={agentModel} list="available-models" placeholder="例如 gpt-5.4-mini" /></label>
-          <label>子 Agent API Key<input type="password" bind:value={agentApiKey} placeholder="留空则复用主模型密钥" /></label>
-        </div>
-        <h2>模型观测</h2>
-        <p class="settings-note">数值来自模型响应中的 usage 字段；上下文窗口为模型系列标称值。余额仅在服务商公开兼容接口可用时显示。</p>
-        <div><button class="quiet-button" onclick={() => refreshModelMetrics(false)}>刷新用量</button><button class="quiet-button" onclick={() => refreshModelMetrics(true)}>查询余额</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
-        <div class="model-metrics">
-          {#if modelMetrics.length}
-            {#each modelMetrics as metric}<UsageCard {metric} />{/each}
-          {:else}
-            <UsageCard metric={null} demo={isDemo} />
+          <div class="model-use-actions"><button class="primary-button" onclick={saveModel}><Save size={14} />保存使用设置</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
+          <h2>模型用量</h2>
+          <p class="settings-note">数值来自模型响应中的 usage 字段；上下文窗口为模型系列标称值。余额仅在服务商公开兼容接口可用时显示。</p>
+          <div class="model-metrics-actions"><button class="quiet-button" onclick={() => refreshModelMetrics(false)}>刷新用量</button><button class="quiet-button" onclick={() => refreshModelMetrics(true)}>查询余额</button></div>
+          <div class="model-metrics">
+            {#if modelMetrics.length}{#each modelMetrics as metric}<UsageCard {metric} />{/each}{:else}<UsageCard metric={null} demo={isDemo} />{/if}
+          </div>
+        {:else}
+          <h2>供应商接入</h2>
+          <p class="settings-note">每个接入只填写一次地址和密钥；完成后到“使用”列表选择默认模型、规划模型和子代理模型。</p>
+          <div class="model-profiles">
+            {#each profiles as profile}
+              <button class:active={profile.id === activeProfileId} onclick={() => activateProfile(profile.id)}><strong>{profile.name}</strong><span>{profile.provider} · {profile.model}</span></button>
+            {/each}
+            <button class="add-profile" onclick={addProfile}>＋ 添加模型服务</button>
+          </div>
+          {#if profiles.length}
+            <div class="settings-form compact-model-form"><label>接入名称<input value={profiles.find((item)=>item.id===activeProfileId)?.name || ''} oninput={(event) => { const name=(event.currentTarget as HTMLInputElement).value; profiles=profiles.map((item)=>item.id===activeProfileId ? {...item,name} : item); persistProfiles(); }} /></label></div>
           {/if}
-        </div>
-        <h2>子代理模型（可选）</h2>
-        <p class="settings-note">留空时子代理复用主 Agent 模型；需要视觉或工具调用时可单独配置。</p>
-        <div class="settings-form">
-          <label>服务商<select bind:value={executorProvider}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label>
-          <label>API 地址<input bind:value={executorEndpoint} /></label>
-          <label>模型<input bind:value={executorModel} list="available-models" placeholder="留空则复用主 Agent" /></label>
-          <label>更新子代理 API Key<input type="password" bind:value={executorApiKey} placeholder="留空则保持现有密钥" /></label>
-          <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。">
-            <Toggle checked={executorVision} onChange={(value)=>executorVision=value}/>
-          </SettingRow>
-          <div>
-            <button class="primary-button" onclick={saveModel}><Save size={14} />保存模型配置</button>
-            {#if saved}<span class="save-result">{saved}</span>{/if}
+          <div class="provider-card">
+            <div class="provider-card-head"><div><strong>{provider}</strong><span>{apiKey ? '待保存的新密钥' : '密钥保存在系统凭据库'}</span></div><span class="badge" class:green={!!apiKey}>接入配置</span></div>
+            <div class="settings-form"><label>服务商<select bind:value={provider} onchange={() => { availableModels=presetForProvider(provider); modelCatalogSource='preset'; }}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label><label>API 地址<input bind:value={endpoint} /></label><label>更新 API Key<input type="password" bind:value={apiKey} placeholder="留空则保持现有密钥" /></label><div><button class="quiet-button" onclick={refreshModelCatalog}>刷新可用模型</button></div></div>
+            <datalist id="available-models">{#each availableModels as item}<option value={item}></option>{/each}</datalist>
+            <div class="enabled-models"><small>{modelCatalogSource === 'provider' ? '已发现模型' : '内置候选模型'}</small>{#each availableModels.slice(0, 12) as item}<span>{item}</span>{/each}</div>
+            <button class="primary-button" onclick={saveModel}><Save size={14} />保存接入</button>{#if saved}<span class="save-result">{saved}</span>{/if}
           </div>
-        </div>
+        {/if}
         <h2>本地语义记忆</h2>
         <SettingRow title="BGE Small 中文向量" desc="首次使用会下载约 60MB 本地模型；已有记忆会在新写入时逐步使用新向量。">
           <Toggle checked={localEmbedding} onChange={(value) => localEmbedding = value} />
