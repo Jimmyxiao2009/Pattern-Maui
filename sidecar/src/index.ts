@@ -481,28 +481,19 @@ async function getIdleSeconds(): Promise<number> {
 }
 function buildSystemPrompt(
   memHits: MemoryRecord[],
-  slot: 'companion' | 'executor' = 'companion',
+  _slot: 'companion' | 'executor' = 'companion',
   context?: {workspace?: string; projectName?: string; attachments?: string[]},
 ) {
-  const useExecutor = slot === 'executor' && config?.executorPersona?.description;
-  const persona = useExecutor
-    ? config!.executorPersona!.description
-    : (config?.persona || 'You are Pattern, a desktop companion defined by the user.');
-  const name = useExecutor
-    ? (config!.executorPersona!.name || config?.personaName || 'Pattern')
-    : (config?.personaName || 'Pattern');
-  const user = useExecutor
-    ? (config!.executorPersona!.userName || config?.userName || 'User')
-    : (config?.userName || 'User');
+  const persona = config?.persona || 'You are Pattern, a desktop companion defined by the user.';
+  const name = config?.personaName || 'Pattern';
+  const user = config?.userName || 'User';
   const index = memory.buildIndex();
   const details = memHits.length
     ? memHits.map((m) => `- (${categoryLabel(m.category)}, imp=${m.importance.toFixed(2)}) ${m.text}`).join('\n')
     : '(no extra retrieval hits this turn)';
   const now = new Date();
   const env = `Local time: ${now.toLocaleString('zh-CN')}. You are a resident desktop companion, not a website chatbot.${plaaState?`\nPLAA emotional state: ${plaaState}`:''}`;
-  const role = slot === 'executor'
-    ? 'You are currently in the executor slot: prefer concrete desktop actions and tool use over chit-chat.'
-    : 'You are currently in the companion slot: conversation, memory, and measured initiative.';
+  const role = 'You are the primary agent. Keep one coherent context for conversation and work. When the user clearly asks you to act, delegate execution to a child agent and return only a concise result summary; do not pollute the main context with child-agent implementation chatter.';
   const workspaceBlock = context?.workspace
     ? `[Active project workspace]
 - Name: ${context.projectName || 'project'}
@@ -516,7 +507,7 @@ ${context.attachments?.length ? `- User attached paths this turn:\n${context.att
 [Identity]
 - Your name: ${name}
 - User address: ${user}
-- Active slot: ${slot}
+- Agent role: primary agent
 - ${role}
 [MEMORY-INDEX | always know what you remember]
 ${index}
@@ -1023,7 +1014,7 @@ async function chat(socket: WebSocket, message: ChatRequest) {
       send(socket, {
         type: 'chat.delta',
         id: message.id,
-        delta: `已转交执行槽：${task.title}\n任务已创建，可在任务页与审查窗跟踪进度。`,
+        delta: `已交给子代理：${task.title}\n任务已创建，主对话只保留结果摘要；可在任务页与审查窗跟踪进度。`,
       });
       send(socket, {type: 'chat.done', id: message.id, slot: 'executor'});
       return;

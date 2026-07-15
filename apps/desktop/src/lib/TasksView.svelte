@@ -155,7 +155,7 @@
 </script>
 
 <section class="view">
-  <PageHeader eyebrow="执行槽" title="任务" subtitle="创建后会走 Computer Use 管线：截屏 → 分级动作 → 必要时人工确认。">
+  <PageHeader eyebrow="子代理" title="任务" subtitle="明确要求执行后，子代理会走 Computer Use 管线：截屏 → 分级动作 → 必要时人工确认。">
     <button class="primary-button" onclick={() => (creating = true)}><Plus size={14} />新任务</button>
   </PageHeader>
   <div class="task-list">
@@ -211,7 +211,7 @@
     <div class="memory-editor" role="dialog" aria-modal="true" aria-labelledby="task-title">
       <header>
         <div>
-          <p class="eyebrow">执行槽</p>
+          <p class="eyebrow">子代理</p>
           <h2 id="task-title">创建任务</h2>
         </div>
         <button aria-label="关闭" onclick={() => (creating = false)}><X size={16} /></button>

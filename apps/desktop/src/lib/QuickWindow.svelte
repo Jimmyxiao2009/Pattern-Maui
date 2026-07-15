@@ -86,7 +86,7 @@
       title,
       detail: text,
     });
-    answer = `已转交执行槽：${title}\n任务已创建。可打开主窗口任务页或审查窗继续查看。`;
+    answer = `已交给子代理：${title}\n任务已创建。主对话只保留结果摘要，可打开主窗口任务页或审查窗查看。`;
     if ((window as any).__TAURI_INTERNALS__) {
       const {invoke} = await import('@tauri-apps/api/core');
       await invoke('show_review');
@@ -194,7 +194,7 @@
   {#if answer || busy}
     <section class="quick-answer">
       <div>
-        <span class="badge amber"><Zap size={11} />{slot === 'executor' ? '执行槽' : '陪伴槽'}</span>
+        <span class="badge amber"><Zap size={11} />{slot === 'executor' ? '子代理' : '主 Agent'}</span>
         {#if busy}<span class="thinking">正在想</span>{/if}
       </div>
       {#if answer}<p>{answer}</p>{:else}<p class="thinking">正在组织回答…</p>{/if}

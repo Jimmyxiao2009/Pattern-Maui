@@ -119,7 +119,7 @@
   <section class="project-chat view" aria-label="项目对话内容">
     <div class="conversation-head">
       <div>
-        <p class="eyebrow">{activeSlot === 'executor' ? '执行槽 · 项目' : '陪伴槽 · 项目'}</p>
+        <p class="eyebrow">主 Agent · 项目</p>
         <h1>{projectChats.find((item) => item.id === activeConversationId)?.title || '项目对话'}</h1>
         <p class="context-chip">已绑定工作区 · {project.path}</p>
       </div>

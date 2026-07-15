@@ -436,40 +436,10 @@ async function activatePersonaCard(card: Persona) {
         <SettingRow title={persona?.name || '未定义'} desc={persona?.description || '尚未完成人格定义'}>
           <button class="quiet-button" onclick={onRedefine}>重新定义</button>
         </SettingRow>
-        <h2>角色槽</h2>
-        <SettingRow title="绑定模式" desc="同一人格占双槽，或两人分别绑定">
-          <div class="segmented">
-            <button class:active={slotMode === 'shared'} onclick={() => { slotMode = 'shared'; companionSlotName = companionSlotName || persona?.name || ''; executorSlotName = companionSlotName; }}>共用</button>
-            <button class:active={slotMode === 'split'} onclick={() => { slotMode = 'split'; companionSlotName = companionSlotName || persona?.name || ''; executorSlotName = executorSlotName || companionSlotName; }}>拆分</button>
-          </div>
-        </SettingRow>
-        <div class="settings-form">
-          <label>陪伴槽人格
-            <select bind:value={companionSlotName}>
-              {#if persona}<option value={persona.name}>{persona.name}（当前）</option>{/if}
-              {#each personaCards as card}
-                {#if card.name !== persona?.name}<option value={card.name}>{card.name}</option>{/if}
-              {/each}
-            </select>
-          </label>
-          {#if slotMode === 'split'}
-            <label>执行槽人格
-              <select bind:value={executorSlotName}>
-                {#if persona}<option value={persona.name}>{persona.name}（当前）</option>{/if}
-                {#each personaCards as card}
-                  {#if card.name !== persona?.name}<option value={card.name}>{card.name}</option>{/if}
-                {/each}
-              </select>
-            </label>
-          {/if}
-          <div>
-            <button class="primary-button" onclick={saveSlotBindings}><Save size={14}/>保存槽绑定</button>
-            {#if saved}<span class="save-result">{saved}</span>{/if}
-          </div>
-        </div>
-        <SettingRow title="陪伴槽" desc={`${companionSlotName || persona?.name || '未绑定'} · 对话 / 记忆 / 主动开口`}><span class="badge green">{slotMode === 'shared' ? '共用' : '已绑定'}</span></SettingRow>
-        <SettingRow title="执行槽" desc={`${(slotMode === 'split' ? executorSlotName : companionSlotName) || persona?.name || '未绑定'} · Computer Use，按 T0–T3 审批`}><span class="badge amber">{slotMode === 'shared' ? '共用' : '已绑定'}</span></SettingRow>
-        <p class="settings-note">主动性偏好仍跟随当前激活人格；拆分后执行任务会使用执行槽人格描述。</p>
+        <h2>Agent 角色</h2>
+        <SettingRow title="主 Agent" desc={`${persona?.name || '当前人格'} · 统一承载聊天、记忆、主动消息和工作决策`}><span class="badge green">当前</span></SettingRow>
+        <SettingRow title="子代理" desc="只有明确要求执行时才派生；独立处理 Computer Use，完成后只回传结果摘要"><span class="badge amber">按需启动</span></SettingRow>
+        <p class="settings-note">主 Agent 与子代理共享人格和必要上下文，但子代理的执行细节不会污染主对话。</p>
         <h2>人格卡</h2>
         {#each personaCards as card}
           <SettingRow title={card.name} desc={card.description}>
@@ -496,7 +466,7 @@ async function activatePersonaCard(card: Persona) {
         <div class="settings-form compact-model-form">
           <label>配置档名称<input value={profiles.find((item)=>item.id===activeProfileId)?.name || ''} oninput={(event) => { const name=(event.currentTarget as HTMLInputElement).value; profiles=profiles.map((item)=>item.id===activeProfileId ? {...item,name} : item); persistProfiles(); }} /></label>
         </div>
-        <h2>陪伴槽模型</h2>
+        <h2>主 Agent 模型</h2>
         <div class="settings-form">
           <label>服务商<select bind:value={provider} onchange={() => { availableModels=presetForProvider(provider); modelCatalogSource='preset'; }}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label>
           <label>API 地址<input bind:value={endpoint} /></label>
@@ -529,13 +499,13 @@ async function activatePersonaCard(card: Persona) {
             <p class="settings-note">尚无调用记录。完成一次对话或任务后可在此查看 token 与缓存命中。</p>
           {/each}
         </div>
-        <h2>执行槽模型</h2>
-        <p class="settings-note">留空时任务执行会复用陪伴槽模型；建议为视觉与工具调用配置单独模型。</p>
+        <h2>子代理模型（可选）</h2>
+        <p class="settings-note">留空时子代理复用主 Agent 模型；需要视觉或工具调用时可单独配置。</p>
         <div class="settings-form">
           <label>服务商<select bind:value={executorProvider}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label>
           <label>API 地址<input bind:value={executorEndpoint} /></label>
-          <label>模型<input bind:value={executorModel} list="available-models" placeholder="留空则复用陪伴槽" /></label>
-          <label>更新执行槽 API Key<input type="password" bind:value={executorApiKey} placeholder="留空则保持现有密钥" /></label>
+          <label>模型<input bind:value={executorModel} list="available-models" placeholder="留空则复用主 Agent" /></label>
+          <label>更新子代理 API Key<input type="password" bind:value={executorApiKey} placeholder="留空则保持现有密钥" /></label>
           <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。">
             <Toggle checked={executorVision} onChange={(value)=>executorVision=value}/>
           </SettingRow>
@@ -550,7 +520,7 @@ async function activatePersonaCard(card: Persona) {
         </SettingRow>
         <button class="quiet-button" onclick={saveModel}><Save size={14}/>保存本地向量设置</button>
         <h2>PLAA 情感状态</h2>
-        <p class="settings-note">可选挂载点。填写本地 PLAA 服务地址后，当前情感状态会加入陪伴槽上下文；留空完全禁用。</p>
+        <p class="settings-note">可选挂载点。填写本地 PLAA 服务地址后，当前情感状态会加入主 Agent 上下文；留空完全禁用。</p>
         <div class="settings-form"><label>PLAA 服务地址<input bind:value={plaaUrl} placeholder="http://127.0.0.1:8765" /></label><button class="quiet-button" onclick={saveModel}><Save size={14}/>保存挂载点</button></div>
       {:else if tab === 'proactive'}
         <h2>主动性</h2>

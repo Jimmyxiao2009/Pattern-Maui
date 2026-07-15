@@ -921,16 +921,16 @@
       messages.push({
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: `已转交执行槽：${title}\n可在下方任务卡片或审查窗跟踪进度。`,
+        text: `已交给子代理：${title}\n主对话只保留结果摘要；可在下方任务卡片或审查窗跟踪进度。`,
         time,
-        proactive: '执行槽',
+        proactive: '子代理',
         taskCard: {taskId, title, status, detail},
         events: [{id: crypto.randomUUID(), kind: 'task', text: `任务已创建 · ${status}`, ts: Date.now(), status: status === 'running' ? 'running' : 'pending', taskId}],
       });
       void persistSession();
     }
     if (options.openTasks !== false) activeView = 'tasks';
-    notify('已转交执行槽并创建任务');
+    notify('已交给子代理并创建任务');
     if ((window as any).__TAURI_INTERNALS__) {
       const {invoke} = await import('@tauri-apps/api/core');
       try {
@@ -1192,7 +1192,7 @@
         <section class="view">
           <div class="conversation-head">
             <div>
-              <p class="eyebrow">{activeSlot === 'executor' ? '执行槽 · 全局' : '陪伴槽 · 全局'}</p>
+              <p class="eyebrow">主 Agent · 全局</p>
               <h1>{activeConversation?.title || '今晚'}</h1>
             </div>
             <button class="quiet-button" onclick={() => newChat('global')}><Plus size={14} />新对话</button>
@@ -1203,7 +1203,7 @@
               <div class="blank-state compact">
                 <div class="blank-mark">⌁</div>
                 <h3>开始一段全局对话</h3>
-                <p>这里是跨项目的陪伴上下文，不会绑定某个工作区。</p>
+                <p>这里是跨项目的主 Agent 上下文，不会绑定某个工作区。</p>
               </div>
             {/if}
             {#each messages as message (message.id)}
@@ -1241,10 +1241,10 @@
           >
             <textarea aria-label="消息" bind:value={draft} onkeydown={keydown} rows="2" placeholder={`和 ${persona?.name || 'Pattern'} 说点什么……`}></textarea>
             <div class="composer-actions">
-              <button type="button" class="text-action" onclick={transferToExecution}>⇧ 转交执行</button>
+              <button type="button" class="text-action" onclick={transferToExecution}>⇧ 交给子代理</button>
               <input aria-label="添加文件" bind:this={attachmentInput} class="file-input" type="file" onchange={attachFile} />
               <button type="button" class="icon-action" title="添加文件（最大 64KB）" aria-label="添加文件" onclick={() => attachmentInput?.click()}><Paperclip size={14} /></button>
-              <span>{activeSlot === 'executor' ? '执行槽' : '陪伴槽'} · 全局</span>
+              <span>主 Agent · 全局</span>
               {#if replying}<button type="button" class="quiet-button" aria-label="停止生成" onclick={stopGeneration}>停止</button>{/if}
               <button class="send-button" aria-label="发送" disabled={!draft.trim() || replying}><ArrowUp size={18} /></button>
             </div>
@@ -1392,7 +1392,7 @@
       {#if foregroundTitle}<span title={foregroundTitle}>前台 <code>{foregroundTitle.slice(0, 24)}{foregroundTitle.length > 24 ? '…' : ''}</code>{foregroundBusy ? ' · 忙' : ''}</span>{/if}
       <span>记忆 <code>{memoryCount}</code> 条</span>
       <i></i>
-      <code>{activeConversation?.scope || 'global'} · {activeSlot} · {agentState}</code>
+            <code>{activeConversation?.scope || 'global'} · primary · {agentState}</code>
     </footer>
   </main>
   {#if toast}<div class="toast show">{toast}</div>{/if}

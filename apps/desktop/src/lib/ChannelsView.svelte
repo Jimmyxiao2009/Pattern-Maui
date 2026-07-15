@@ -249,7 +249,7 @@
           <label>IMAP 主机<input bind:value={emailImapHost} placeholder="imap.example.com" /></label>
           <label>IMAP 端口<input type="number" bind:value={emailImapPort} /></label>
           <label class="telegram-enable"><Toggle checked={emailImapSecure} onChange={(value) => emailImapSecure = value} />使用 TLS（通常为 993 端口）</label>
-          <p class="field-help">轮询未读邮件并交给陪伴槽回复到配置的收件地址。请使用专用邮箱或应用密码。</p>
+          <p class="field-help">轮询未读邮件并交给主 Agent 回复到配置的收件地址。请使用专用邮箱或应用密码。</p>
         {/if}
       {/if}
       <div class="plugin-settings"><p class="field-label">本地通道插件</p>

@@ -1,4 +1,4 @@
-/** Slot selection and small, framework-independent agent contracts. */
+/** Routing compatibility kept for the wire protocol; the UI exposes one primary agent. */
 export type AgentSlot = 'companion' | 'executor';
 export interface RouteDecision { slot: AgentSlot; confidence: number; reason: string; }
 
@@ -17,7 +17,7 @@ export function routeUserMessage(text: string): RouteDecision {
   return {slot: 'companion', confidence: 0.55, reason: 'ambiguous conversation/default'};
 }
 
-/** Whether frontend should hand the message to Computer Use instead of chat. */
+/** Whether the primary agent should delegate this explicit action to a child agent. */
 export function shouldTransferToExecutor(text: string, minConfidence = 0.8): boolean {
   const decision = routeUserMessage(text);
   return decision.slot === 'executor' && decision.confidence >= minConfidence;
