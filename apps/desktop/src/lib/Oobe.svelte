@@ -3,9 +3,20 @@
   import {KeyRound,ShieldCheck,UserRound,ArrowLeft,ArrowRight,Upload} from 'lucide-svelte';
   import StatusDot from './StatusDot.svelte';
   import type {ModelSetup,Persona} from './types';
-  let{onComplete}:{onComplete:(persona:Persona,model:ModelSetup)=>Promise<void>}=$props();
+  let{onComplete,mode='setup',initialPersona=null,onCancel}:{onComplete:(persona:Persona,model:ModelSetup)=>Promise<void>;mode?:'setup'|'redefine';initialPersona?:Persona|null;onCancel?:()=>void}=$props();
   let step=$state(1);let provider=$state('OpenAI Compatible');let endpoint=$state('https://api.openai.com/v1');let model=$state('gpt-4.1-mini');let apiKey=$state('');
-  let name=$state('');let userName=$state('');let description=$state('');let proactive=$state<'free'|'quiet'>('free');let validation=$state('');let permissionStatus=$state('');let completed=$state(false);let saving=$state(false);let importInput=$state<HTMLInputElement>();
+  let name=$state('');let userName=$state('');let description=$state('');let proactive=$state<'free'|'quiet'>('free');let validation=$state('');let permissionStatus=$state('');let completed=$state(false);let saving=$state(false);let importInput=$state<HTMLInputElement>();let seeded=$state(false);
+  $effect.pre(() => {
+    if (seeded) return;
+    seeded = true;
+    if (mode === 'redefine') {
+      step = 3;
+      name = initialPersona?.name || '';
+      userName = initialPersona?.userName || '';
+      description = initialPersona?.description || '';
+      proactive = initialPersona?.proactive || 'free';
+    }
+  });
   type PermissionStatus={platform:'windows'|'macos'|'other';notifications:boolean;accessibility:boolean;screenRecording:boolean};
   let permissions=$state<PermissionStatus>({platform:navigator.userAgent.includes('Windows')?'windows':'other',notifications:false,accessibility:false,screenRecording:false});
   const canContinue=()=>step===1?endpoint.trim().length>0&&model.trim().length>0:step===2||name.trim().length>0&&description.trim().length>0;
@@ -18,18 +29,18 @@
 </script>
 {#if !completed}
 <div class="oobe-backdrop">
-  <div class="oobe-window" role="dialog" aria-modal="true" aria-label="首次启动设置">
+  <div class="oobe-window" role="dialog" aria-modal="true" aria-label={mode==='redefine'?'重新定义人格':'首次启动设置'}>
     <aside class="oobe-side">
       <div class="oobe-mark"><StatusDot size="large" off={step<3}/></div>
-      <div class="oobe-steps">
+      {#if mode==='setup'}<div class="oobe-steps">
         <div class:current={step===1} class:done={step>1}><i>{step>1?'✓':'1'}</i><KeyRound size={15}/>接入模型</div>
         <div class:current={step===2} class:done={step>2}><i>{step>2?'✓':'2'}</i><ShieldCheck size={15}/>授予权限</div>
         <div class:current={step===3}><i>3</i><UserRound size={15}/>定义人格</div>
-      </div>
-      <p>{step===1?'Pattern 不托管密钥，它只会存入系统凭据管理器。':step===2?'权限随时可以在系统设置中收回。':'没有模板。你写下什么，TA 就是什么样。'}</p>
+      </div>{:else}<div class="oobe-steps"><div class="current"><i>3</i><UserRound size={15}/>重新定义人格</div></div>{/if}
+      <p>{mode==='redefine'?'只修改人格，不会重置模型接入和系统权限。':step===1?'Pattern 不托管密钥，它只会存入系统凭据管理器。':step===2?'权限随时可以在系统设置中收回。':'没有模板。你写下什么，TA 就是什么样。'}</p>
     </aside>
     <div class="oobe-content">
-      <header><span>首次启动</span><strong>0{step} / 03</strong></header>
+      <header><span>{mode==='redefine'?'人格设置':'首次启动'}</span><strong>0{step} / 03</strong></header>
       {#if step===1}
         <div class="oobe-form"><div><p class="eyebrow">接入模型</p><h1>先让 TA 能开口</h1><p class="subtitle">配置主 Agent 使用的模型。明确要求干活时，主 Agent 会派生子代理执行。</p></div><label>服务商<select bind:value={provider} onchange={providerChanged}><option>OpenAI Compatible</option><option>Anthropic</option><option>OpenAI</option></select></label><label>API 地址<input bind:value={endpoint} placeholder="https://api.openai.com/v1"></label><label>模型<input bind:value={model} placeholder="gpt-4.1-mini"></label><label>API Key（可选）<input bind:value={apiKey} type="password" placeholder="留空，稍后在设置中填写"></label></div>
       {:else if step===2}
@@ -37,7 +48,7 @@
       {:else}
         <div class="oobe-form"><div><p class="eyebrow">定义人格</p><h1>TA 是谁，由你来写</h1><p class="subtitle">人格是数据，不是预设。完成后会保存为本地人格配置。</p></div><div class="form-grid"><label>名字<input bind:value={name} placeholder="还没有名字"></label><label>TA 怎么称呼你<input bind:value={userName} placeholder="留空让 TA 自己决定"></label></div><label>性格与说话方式<textarea bind:value={description} rows="5" placeholder="说话直接点，不用客套。我熬夜要管，写作的时候别打断……"></textarea></label><span class="field-label">主动性</span><div class="segmented wide"><button class:active={proactive==='free'} onclick={()=>proactive='free'}>随 TA，想说就说</button><button class:active={proactive==='quiet'} onclick={()=>proactive='quiet'}>安静一些</button></div><input aria-label="导入人格卡文件" bind:this={importInput} class="file-input" type="file" accept=".md,text/markdown,text/plain" onchange={importCard}/><button class="import-button" onclick={()=>importInput?.click()}><Upload size={15}/>导入人格卡</button></div>
       {/if}
-      <footer>{#if step>1}<button class="quiet-button" onclick={()=>{validation='';step-=1;}}><ArrowLeft size={15}/>上一步</button>{/if}{#if validation}<em class="validation-error" role="alert">{validation}</em>{/if}<span></span><button class="primary-button" onclick={next} disabled={saving}>{saving?'正在保存…':step===3?'完成设置':'继续'}<ArrowRight size={15}/></button></footer>
+      <footer>{#if mode==='redefine'}<button class="quiet-button" type="button" onclick={()=>onCancel?.()}>取消</button>{:else if step>1}<button class="quiet-button" onclick={()=>{validation='';step-=1;}}><ArrowLeft size={15}/>上一步</button>{/if}{#if validation}<em class="validation-error" role="alert">{validation}</em>{/if}<span></span><button class="primary-button" onclick={next} disabled={saving}>{saving?'正在保存…':mode==='redefine'?'保存人格':step===3?'完成设置':'继续'}<ArrowRight size={15}/></button></footer>
     </div>
   </div>
 </div>
