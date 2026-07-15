@@ -83,10 +83,24 @@
   let foregroundTitle = $state('');
   let foregroundBusy = $state(false);
   let projectDiff = $state<{status: string; diff: string} | null>(null);
+  let clock = $state(Date.now());
 
   const activeConversation = $derived(conversations.find((item) => item.id === activeConversationId) || null);
   const activeProject = $derived(projects.find((item) => item.id === activeProjectId) || null);
   const showRecents = $derived(activeView === 'chat' || activeView === 'conversations');
+  const homeGreeting = $derived.by(() => {
+    const hour = new Date(clock).getHours();
+    const salutation = hour < 5 ? '夜深了' : hour < 12 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : hour < 23 ? '晚上好' : '夜深了';
+    const name = persona?.userName?.trim();
+    return name ? `${salutation}，${name}` : salutation;
+  });
+  const homeContext = $derived.by(() => {
+    const date = new Date(clock);
+    const weekday = '日一二三四五六'[date.getDay()];
+    const unread = proactiveInbox.filter((item) => item.state !== 'read' && item.state !== 'dismissed').length;
+    const extra = unread ? ` · ${unread} 条主动消息待处理` : conversations.length ? ` · ${conversations.length} 个对话在本地` : '';
+    return `${date.getMonth() + 1}月${date.getDate()}日 · 星期${weekday} · 全局对话${extra}`;
+  });
 
   async function pushTrayState(state: typeof agentState) {
     if (!(window as any).__TAURI_INTERNALS__) return;
@@ -660,6 +674,8 @@
     ready = true;
     void refreshForeground();
     void refreshMemoryProposals();
+    (window as any).__patternClockTimer && clearInterval((window as any).__patternClockTimer);
+    (window as any).__patternClockTimer = setInterval(() => { clock = Date.now(); }, 60_000);
     const fgTimer = setInterval(() => { void refreshForeground(); }, 4000);
     // Store on window so we can clear if hot-reloaded; onMount async cannot return cleanup.
     (window as any).__patternFgTimer && clearInterval((window as any).__patternFgTimer);
@@ -1194,9 +1210,10 @@
       {#if activeView === 'chat'}
         <section class="view">
           <div class="conversation-head">
-            <div>
+            <div class="conversation-head-copy">
               <p class="eyebrow">主 Agent · 全局</p>
-              <h1>{activeConversation?.title || '今晚'}</h1>
+              <h1>{activeConversation?.title || homeGreeting}</h1>
+              {#if !activeConversation}<p class="conversation-context">{homeContext}</p>{/if}
             </div>
             <button class="quiet-button" onclick={() => newChat('global')}><Plus size={14} />新对话</button>
           </div>
