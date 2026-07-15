@@ -334,6 +334,7 @@ export type ClientMessage =
   | { type: 'relay.syncNow'; id: string }
   | { type: 'task.list'; id: string }
   | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule }
+  | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule }
   | { type: 'task.control'; id: string; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject' }
   | { type: 'task.delete'; id: string; taskId: string }
   | { type: 'model.metrics.get'; id: string }

@@ -26,7 +26,7 @@
     {id: 'project', label: '项目', icon: FolderGit2},
     {id: 'conversations', label: '管理', icon: MessagesSquare},
     {id: 'memory', label: '记忆', icon: Layers3},
-    {id: 'tasks', label: '任务', icon: Zap},
+    {id: 'tasks', label: '定时', icon: Zap},
     {id: 'workflows', label: '工作流', icon: Workflow},
     {id: 'mcp', label: '工具', icon: Wrench},
     {id: 'channels', label: '通道', icon: Send},
@@ -550,7 +550,10 @@
     try {
       const stored = JSON.parse(localStorage.getItem('pattern-conversations') || '[]') as Conversation[];
       if (Array.isArray(stored) && stored.length) {
-        conversations = stored.map((item) => normalizeConversation(item));
+        // Migrate empty conversations created by the pre-lazy-create startup path.
+        const normalized = stored.map((item) => normalizeConversation(item));
+        conversations = normalized.filter((item) => item.messages.some((message) => message.text.trim()));
+        if (conversations.length !== normalized.length) persistConversations();
       }
     } catch { /* start with a clean local conversation list */ }
     try {
@@ -898,9 +901,7 @@
     const title = taskTitleFromText(text);
     const detail = text;
     if (!(await runtime.connect())) {
-      taskDraft = {title, detail, nonce: Date.now()};
-      if (options.openTasks !== false) activeView = 'tasks';
-      notify('运行时未连接，已带到任务页草稿');
+      notify('运行时未连接，暂时不能派给子代理');
       return null;
     }
     activeSlot = 'executor';

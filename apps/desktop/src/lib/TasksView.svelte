@@ -13,6 +13,7 @@
   } = $props();
   let tasks = $state<TaskItem[]>([]);
   let creating = $state(false);
+  let editingTask = $state<TaskItem | null>(null);
   let title = $state('');
   let detail = $state('');
   let recurring = $state(false);
@@ -23,14 +24,13 @@
   let onceAt = $state('');
   let error = $state('');
   let consumedDraft = $state<number | null>(null);
+  const scheduledTasks = $derived(tasks.filter((task) => !!task.schedule));
 
   $effect(() => {
     if (initialDraft && initialDraft.nonce !== consumedDraft) {
-      title = initialDraft.title;
-      detail = initialDraft.detail;
-      creating = true;
       consumedDraft = initialDraft.nonce;
       onDraftConsumed();
+      notify('执行请求应直接在聊天中交给主 Agent；这里仅管理定时任务');
     }
   });
 
@@ -62,43 +62,32 @@
       error = '请写下任务名称';
       return;
     }
-    const schedule = recurring ? buildSchedule() : undefined;
-    if (recurring && !schedule) { error = '请完整填写定时规则'; return; }
-    const scheduled = !!schedule;
+    const schedule = buildSchedule();
+    if (!schedule) { error = '请完整填写定时规则'; return; }
     if (!(await runtime.connect())) {
-      // fallback local queue
-      tasks.unshift({
-        id: crypto.randomUUID(),
-        title: title.trim(),
-        detail: detail.trim(),
-        status: scheduled ? 'scheduled' : 'queued',
-        createdAt: new Date().toLocaleString('zh-CN'),
-        schedule,
-      });
-      creating = false;
-      title = '';
-      detail = '';
-      recurring = false;
-      notify('任务已加入本地队列（运行时未连接）');
+      error = '运行时未连接，定时任务尚未保存';
       return;
     }
-    await runtime.request({
-      type: 'task.create',
-      id: crypto.randomUUID(),
-      title: title.trim(),
-      detail: detail.trim(),
-      schedule,
-    });
+    const wasEditing = !!editingTask;
+    if (editingTask) {
+      const response = await runtime.request<any>({type:'task.update', id:crypto.randomUUID(), taskId:editingTask.id, title:title.trim(), detail:detail.trim(), schedule});
+      if (response.type === 'error') { error = response.message; return; }
+    } else await runtime.request({type:'task.create', id:crypto.randomUUID(), title:title.trim(), detail:detail.trim(), schedule});
     creating = false;
+    editingTask = null;
     title = '';
     detail = '';
-    recurring = false;
     await refresh();
-    notify(scheduled ? `已创建${scheduleLabel(schedule!)}定时任务` : '任务已提交执行引擎');
-    if (!scheduled && (window as any).__TAURI_INTERNALS__) {
-      const {invoke} = await import('@tauri-apps/api/core');
-      await invoke('show_review');
-    }
+    notify(wasEditing ? '定时任务已更新' : `已创建${scheduleLabel(schedule)}定时任务`);
+  }
+
+  function openCreate() {
+    editingTask = null; title = ''; detail = ''; recurring = true; error = ''; scheduleKind = 'daily'; scheduleTime = '09:00'; scheduleDays = [1]; intervalMinutes = 60; onceAt = ''; creating = true;
+  }
+  function openEdit(task: TaskItem) {
+    const schedule = task.schedule;
+    if (!schedule) return;
+    editingTask = task; title = task.title; detail = task.detail || ''; recurring = true; scheduleKind = schedule.kind; scheduleTime = schedule.time || '09:00'; scheduleDays = schedule.days || [1]; intervalMinutes = schedule.intervalMinutes || 60; onceAt = schedule.at ? new Date(schedule.at).toISOString().slice(0,16) : ''; error = ''; creating = true;
   }
 
   function buildSchedule(): TaskItem['schedule'] | undefined {
@@ -155,11 +144,11 @@
 </script>
 
 <section class="view">
-  <PageHeader eyebrow="子代理" title="任务" subtitle="明确要求执行后，子代理会走 Computer Use 管线：截屏 → 分级动作 → 必要时人工确认。">
-    <button class="primary-button" onclick={() => (creating = true)}><Plus size={14} />新任务</button>
+  <PageHeader eyebrow="定时任务" title="定时任务" subtitle="聊天里直接告诉主 Agent 做事；这里只查看和编辑需要按时间自动执行的任务。">
+    <button class="primary-button" onclick={openCreate}><Plus size={14} />新建定时任务</button>
   </PageHeader>
   <div class="task-list">
-    {#each tasks as task}
+    {#each scheduledTasks as task}
       <article>
         <div class="task-state">
           <StatusDot active={task.status === 'running' || task.status === 'queued' || task.status === 'scheduled'} off={task.status === 'cancelled' || task.status === 'failed'} />
@@ -179,6 +168,7 @@
           {#if task.error}<p class="validation-error">{task.error}</p>{/if}
         </div>
         <div class="task-actions">
+          <button title="编辑定时任务" aria-label="编辑定时任务" onclick={() => openEdit(task)}>编辑</button>
           {#if task.status === 'awaiting_approval'}
             <button title="打开审查窗" aria-label="打开审查窗" onclick={async () => (window as any).__TAURI_INTERNALS__ && (await import('@tauri-apps/api/core')).invoke('show_review')}>
               <ShieldAlert size={14} />
@@ -198,9 +188,9 @@
     {:else}
       <div class="blank-state">
         <div class="blank-mark">⌁</div>
-        <h3>还没有任务</h3>
-        <p>创建任务后，执行引擎会截屏并按安全分级推进；T2 动作会弹出审查窗。</p>
-        <button class="primary-button" onclick={() => (creating = true)}><Plus size={14} />创建第一个任务</button>
+        <h3>还没有定时任务</h3>
+        <p>日常执行直接在聊天里交给主 Agent；需要每天、每周或按间隔自动运行时，再在这里设置。</p>
+        <button class="primary-button" onclick={openCreate}><Plus size={14} />新建定时任务</button>
       </div>
     {/each}
   </div>
@@ -211,14 +201,13 @@
     <div class="memory-editor" role="dialog" aria-modal="true" aria-labelledby="task-title">
       <header>
         <div>
-          <p class="eyebrow">子代理</p>
-          <h2 id="task-title">创建任务</h2>
+          <p class="eyebrow">定时任务</p>
+          <h2 id="task-title">{editingTask ? '编辑定时任务' : '新建定时任务'}</h2>
         </div>
         <button aria-label="关闭" onclick={() => (creating = false)}><X size={16} /></button>
       </header>
       <label>任务名称<input bind:value={title} placeholder="例如：整理下载目录中的文件" /></label>
       <label>补充说明<textarea bind:value={detail} rows="4" placeholder="期望结果、限制或需要注意的事项"></textarea></label>
-      <label class="task-schedule-toggle"><input type="checkbox" bind:checked={recurring} /> 设为定时任务（Agent 也可理解“每天 09:00 …”后创建）</label>
       {#if recurring}
         <label>执行规则<select bind:value={scheduleKind}><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">按间隔</option><option value="once">仅一次</option></select></label>
         {#if scheduleKind === 'daily' || scheduleKind === 'weekly'}<label>执行时间<input type="time" bind:value={scheduleTime} /></label>{/if}
@@ -229,7 +218,7 @@
       {#if error}<p class="validation-error">{error}</p>{/if}
       <footer>
         <button onclick={() => (creating = false)}>取消</button>
-        <button class="primary-button" onclick={create}>开始执行</button>
+        <button class="primary-button" onclick={create}>{editingTask ? '保存修改' : '创建定时任务'}</button>
       </footer>
     </div>
   </div>

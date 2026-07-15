@@ -1784,6 +1784,21 @@ case 'journal.list': {
         void task;
         break;
       }
+      case 'task.update': {
+        const task = tasks.find((item) => item.id === message.taskId);
+        if (!task) { send(socket, {type:'error', id:message.id, message:'task not found'}); break; }
+        if (['running', 'awaiting_approval'].includes(task.status)) { send(socket, {type:'error', id:message.id, message:'执行中的任务不能编辑'}); break; }
+        task.title = message.title.trim().slice(0, 160) || task.title;
+        task.detail = (message.detail || '').trim().slice(0, 8000);
+        task.schedule = message.schedule;
+        task.schedule.enabled = true;
+        task.status = 'scheduled';
+        task.nextRunAt = nextScheduleAt(task.schedule);
+        task.error = undefined;
+        saveTasks(); announceTask(task);
+        send(socket, {type:'task.list.result', id:message.id, tasks});
+        break;
+      }
       case 'task.control': {
         const task = tasks.find((t) => t.id === message.taskId);
         if (!task) {
