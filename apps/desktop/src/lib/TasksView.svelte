@@ -222,9 +222,12 @@
       <div class="automation-steps">
         <div class="setting-inline"><strong>自动化步骤（可选）</strong><span class="settings-note">按顺序执行，类似步骤记录器</span></div>
         {#each planSteps as step, index (step.id)}
-          <div class="automation-step"><b>{index + 1}</b><span><strong>{step.title}</strong><small>{step.detail}</small></span><button type="button" aria-label={`删除步骤 ${index + 1}`} onclick={() => planSteps = planSteps.filter((item) => item.id !== step.id)}><X size={13} /></button></div>
+          <div class="automation-step">
+            <div class="automation-step-head"><b>{index + 1}</b><strong>{step.title}</strong><button type="button" aria-label={`删除步骤 ${index + 1}`} onclick={() => planSteps = planSteps.filter((item) => item.id !== step.id)}><X size={13} /></button></div>
+            <small>{step.detail}</small>
+          </div>
         {/each}
-        <div class="automation-step-form"><input aria-label="步骤名称" bind:value={stepTitle} placeholder="步骤名称，例如：打开邮件客户端" /><input aria-label="步骤说明" bind:value={stepDetail} placeholder="具体操作，例如：筛选今天未读邮件" /><button type="button" class="quiet-button" onclick={addPlanStep}><Plus size={13} />添加步骤</button></div>
+        <div class="automation-step-form"><label>步骤名称<input aria-label="步骤名称" bind:value={stepTitle} placeholder="例如：打开邮件客户端" /></label><label>操作说明<textarea aria-label="步骤说明" bind:value={stepDetail} rows="3" placeholder="例如：筛选今天未读邮件并打开第一封"></textarea></label><button type="button" class="quiet-button" onclick={addPlanStep}><Plus size={13} />添加步骤</button></div>
       </div>
       {#if recurring}
         <label>执行规则<select bind:value={scheduleKind}><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">按间隔</option><option value="once">仅一次</option></select></label>
