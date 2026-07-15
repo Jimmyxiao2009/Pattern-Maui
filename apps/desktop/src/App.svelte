@@ -1388,7 +1388,10 @@
       {/if}
     </div>
     <footer class="statusbar">
-      <span><StatusDot size="tiny" active={runtimeConnected} />{runtimeConnected ? '运行时已连接' : '运行时未连接'}</span>
+      <span title={runtimeConnected ? 'Node Sidecar 已连接' : isDemo ? '当前是浏览器演示预览，不会启动 Node Sidecar' : '桌面端未能连接 Node Sidecar'}>
+        <StatusDot size="tiny" active={runtimeConnected} />
+        {runtimeConnected ? '运行时已连接' : isDemo ? '演示模式 · 不连接运行时' : '运行时未连接'}
+      </span>
       <span>今日主动 <code>{proactiveCount}</code> 次</span>
       {#if foregroundTitle}<span title={foregroundTitle}>前台 <code>{foregroundTitle.slice(0, 24)}{foregroundTitle.length > 24 ? '…' : ''}</code>{foregroundBusy ? ' · 忙' : ''}</span>{/if}
       <span>记忆 <code>{memoryCount}</code> 条</span>
