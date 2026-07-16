@@ -174,7 +174,7 @@
         <p>本机主动提醒与任务结果</p>
       </div>
       <span class="online">本机可用</span>
-      <Toggle checked={true} />
+      <Toggle checked={true} disabled={true} label="系统通知已启用" />
     </article>
     <article>
       <div class="channel-icon"><Smartphone size={19} /></div>
@@ -230,32 +230,32 @@
       <label>用户名<input bind:value={username} /></label>
       <label>密码<input type="password" bind:value={password} placeholder="留空则保持现有密码" /></label>
       <p class="field-help">密码写入系统凭据管理器。消息 body 使用本地 channel key 加密后上传。开发验收可用 local:C:\path\to\relay-root 作为本地目录后端。</p>
-      <label class="telegram-enable"><Toggle checked={telegramEnabled} onChange={(value) => telegramEnabled = value} />启用 Telegram Bot</label>
+      <div class="telegram-enable"><Toggle checked={telegramEnabled} label="启用 Telegram Bot" onChange={(value) => telegramEnabled = value} />启用 Telegram Bot</div>
       {#if telegramEnabled}
         <label>Chat ID<input bind:value={telegramChatId} placeholder="与 Bot 开始对话后填写 chat id" /></label>
         <label>Bot Token<input type="password" bind:value={telegramToken} placeholder="留空则保留现有 Token" /></label>
         <p class="field-help">仅用于主动提醒和任务结果外发；Token 写入系统凭据管理器。</p>
       {/if}
-      <label class="telegram-enable"><Toggle checked={emailEnabled} onChange={(value) => emailEnabled = value} />启用 SMTP 邮件通知</label>
+      <div class="telegram-enable"><Toggle checked={emailEnabled} label="启用 SMTP 邮件通知" onChange={(value) => emailEnabled = value} />启用 SMTP 邮件通知</div>
       {#if emailEnabled}
         <label>SMTP 主机<input bind:value={emailHost} placeholder="smtp.example.com" /></label>
         <label>SMTP 端口<input type="number" bind:value={emailPort} /></label>
         <label>用户名/发件人<input bind:value={emailUsername} type="email" /></label>
         <label>收件人<input bind:value={emailRecipient} type="email" /></label>
         <label>SMTP 密码或应用专用密码<input type="password" bind:value={smtpPassword} placeholder="留空则保留现有密码" /></label>
-        <label class="telegram-enable"><Toggle checked={emailSecure} onChange={(value) => emailSecure = value} />使用隐式 TLS（通常为 465 端口）</label>
-        <label class="telegram-enable"><Toggle checked={emailImapEnabled} onChange={(value) => emailImapEnabled = value} />启用 IMAP 入站邮件</label>
+        <div class="telegram-enable"><Toggle checked={emailSecure} label="使用隐式 TLS" onChange={(value) => emailSecure = value} />使用隐式 TLS（通常为 465 端口）</div>
+        <div class="telegram-enable"><Toggle checked={emailImapEnabled} label="启用 IMAP 入站邮件" onChange={(value) => emailImapEnabled = value} />启用 IMAP 入站邮件</div>
         {#if emailImapEnabled}
           <label>IMAP 主机<input bind:value={emailImapHost} placeholder="imap.example.com" /></label>
           <label>IMAP 端口<input type="number" bind:value={emailImapPort} /></label>
-          <label class="telegram-enable"><Toggle checked={emailImapSecure} onChange={(value) => emailImapSecure = value} />使用 TLS（通常为 993 端口）</label>
+          <div class="telegram-enable"><Toggle checked={emailImapSecure} label="IMAP 使用 TLS" onChange={(value) => emailImapSecure = value} />使用 TLS（通常为 993 端口）</div>
           <p class="field-help">轮询未读邮件并交给主 Agent 回复到配置的收件地址。请使用专用邮箱或应用密码。</p>
         {/if}
       {/if}
       <div class="plugin-settings"><p class="field-label">本地通道插件</p>
         {#if availablePlugins.length}
           {#each availablePlugins as plugin}
-            <div class="plugin-row"><label class="telegram-enable"><Toggle checked={isPluginEnabled(plugin.id)} onChange={(value) => togglePlugin(plugin.id,value)} />启用 {plugin.name} <small>v{plugin.version}</small></label>
+            <div class="plugin-row"><div class="telegram-enable"><Toggle checked={isPluginEnabled(plugin.id)} label={`启用 ${plugin.name}`} onChange={(value) => togglePlugin(plugin.id,value)} />启用 {plugin.name} <small>v{plugin.version}</small></div>
             {#if plugin.description}<p class="field-help">{plugin.description}</p>{/if}
             {#if isPluginEnabled(plugin.id)}<label>插件配置（JSON，不要填写密钥）<textarea bind:value={pluginConfigText[plugin.id]} rows="4" spellcheck="false"></textarea></label>{/if}</div>
           {/each}

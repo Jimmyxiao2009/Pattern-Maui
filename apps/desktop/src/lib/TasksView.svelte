@@ -1,6 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
-  import {Plus, Pause, Play, Square, Trash2, X, ShieldAlert} from 'lucide-svelte';
+  import {Plus, Pause, Play, RotateCcw, Square, Trash2, X, ShieldAlert} from 'lucide-svelte';
   import PageHeader from './PageHeader.svelte';
   import StatusDot from './StatusDot.svelte';
   import type {TaskItem} from './types';
@@ -27,7 +27,10 @@
   let stepDetail = $state('');
   let error = $state('');
   let consumedDraft = $state<number | null>(null);
-  const scheduledTasks = $derived(tasks.filter((task) => !!task.schedule));
+  const visibleTasks = $derived([...tasks].sort((a, b) => {
+    const active = (task: TaskItem) => ['queued', 'running', 'paused', 'awaiting_approval'].includes(task.status) ? 1 : 0;
+    return active(b) - active(a);
+  }));
 
   $effect(() => {
     if (initialDraft && initialDraft.nonce !== consumedDraft) {
@@ -55,7 +58,7 @@
         }
       }
       if (message.type === 'task.approval_required' && (window as any).__TAURI_INTERNALS__) {
-        void import('@tauri-apps/api/core').then(({invoke}) => invoke('show_review'));
+        void import('@tauri-apps/api/core').then(({invoke}) => invoke('show_review', {taskId: message.taskId}));
       }
     });
   });
@@ -120,7 +123,8 @@
       await runtime.request({type: 'task.control', id: crypto.randomUUID(), taskId: task.id, action});
       await refresh();
     } else {
-      task.status = action === 'cancel' ? 'cancelled' : action === 'pause' ? 'paused' : 'queued';
+      notify('运行时未连接，任务状态没有改变');
+      return;
     }
     notify(action === 'cancel' ? '任务已终止' : action === 'pause' ? '任务已暂停' : '任务已恢复');
   }
@@ -135,6 +139,16 @@
       if (response.type==='task.list.result') tasks=response.tasks;
     } else tasks = tasks.filter((item) => item.id !== id);
     notify('任务记录已删除');
+  }
+
+  async function rollbackRecovery(task: TaskItem) {
+    if (!(await runtime.connect())) { notify('运行时未连接，恢复没有执行'); return; }
+    const assumeExclusive = task.recovery?.state === 'recovery_required';
+    if (assumeExclusive && !window.confirm('该事务在 Pattern 异常退出时中断。只有确认恢复范围内没有其它进程在此后写入，才能继续恢复。')) return;
+    const response = await runtime.request<any>({type:'task.recovery.rollback', id:crypto.randomUUID(), taskId:task.id, assumeExclusive});
+    if (response.type === 'error') { notify(`恢复失败：${response.message}`); return; }
+    if (response.type === 'task.list.result') tasks = response.tasks;
+    notify('AgentOS 已恢复任务修改');
   }
 
   function statusLabel(status: TaskItem['status']) {
@@ -154,11 +168,11 @@
 </script>
 
 <section class="view">
-  <PageHeader eyebrow="定时任务" title="定时任务" subtitle="聊天里直接告诉主 Agent 做事；这里只查看和编辑需要按时间自动执行的任务。">
+  <PageHeader eyebrow="执行与定时" title="任务" subtitle="查看正在执行、等待确认和按时间运行的任务。">
     <button class="primary-button" onclick={openCreate}><Plus size={14} />新建定时任务</button>
   </PageHeader>
   <div class="task-list">
-    {#each scheduledTasks as task}
+    {#each visibleTasks as task}
       <article>
         <div class="task-state">
           <StatusDot active={task.status === 'running' || task.status === 'queued' || task.status === 'scheduled'} off={task.status === 'cancelled' || task.status === 'failed'} />
@@ -167,6 +181,7 @@
           <div>
             <span class="badge" class:amber={task.status === 'queued' || task.status === 'awaiting_approval' || task.status === 'scheduled'} class:green={task.status === 'done'} class:dim={task.status === 'cancelled'}>{statusLabel(task.status)}</span>
             {#if task.riskTier !== undefined}<span class="badge">T{task.riskTier}</span>{/if}
+            {#if task.recovery}<span class="badge" class:green={task.recovery.state === 'committed'} class:amber={task.recovery.state === 'active' || task.recovery.state === 'prepared'} class:dim={task.recovery.state === 'unavailable'}>恢复 · {task.recovery.state}</span>{/if}
             <time>{task.createdAt}</time>
           </div>
           <h3>{task.title}</h3>
@@ -174,12 +189,17 @@
           {#if task.schedule}<p>↻ {scheduleLabel(task.schedule)} 自动执行 · 已运行 {task.runCount || 0} 次</p>{/if}
           {#if task.plan?.length}<p>☷ {task.plan.length} 个自动化步骤：{task.plan.map((step) => step.title).join(' → ')}</p>{/if}
           {#if task.workflow}<p>⚙ {task.workflow.name} · {task.workflow.agents || task.workflow.stepCount} 个 Agent · {task.workflow.workspace || '当前工作区'}</p>{/if}
+          {#if task.recovery?.transactionId}<p>↶ AgentOS 事务 {task.recovery.transactionId.slice(0,12)} · {task.recovery.fileScopes.join('、')}</p>{/if}
+          {#if task.recovery?.error}<p class="validation-error">恢复层：{task.recovery.error}</p>{/if}
           {#if task.agentResults?.length}<details class="task-runs"><summary>子 Agent 结果（{task.agentResults.length}）</summary>{#each task.agentResults as result}<p><b>{result.skillId}</b> · {result.status} · {result.output.slice(0,240)}</p>{/each}</details>{/if}
           {#if task.runs?.length}<details class="task-runs"><summary>运行记录（{task.runs.length}）</summary>{#each task.runs.slice(0,5) as run}<p>{new Date(run.startedAt).toLocaleString('zh-CN')} · {run.status}{run.error ? ` · ${run.error}` : ''}</p>{/each}</details>{/if}
           {#if task.error}<p class="validation-error">{task.error}</p>{/if}
         </div>
         <div class="task-actions">
-          <button title="编辑定时任务" aria-label="编辑定时任务" onclick={() => openEdit(task)}>编辑</button>
+          {#if task.recovery?.transactionId && ['committed','prepared','conflicted','recovery_required'].includes(task.recovery.state)}
+            <button title="恢复任务修改" aria-label="恢复任务修改" onclick={() => rollbackRecovery(task)}><RotateCcw size={14} /></button>
+          {/if}
+          {#if task.schedule}<button title="编辑定时任务" aria-label="编辑定时任务" onclick={() => openEdit(task)}>编辑</button>{/if}
           {#if task.status === 'awaiting_approval'}
             <button title="打开审查窗" aria-label="打开审查窗" onclick={async () => (window as any).__TAURI_INTERNALS__ && (await import('@tauri-apps/api/core')).invoke('show_review')}>
               <ShieldAlert size={14} />
@@ -199,8 +219,8 @@
     {:else}
       <div class="blank-state">
         <div class="blank-mark">⌁</div>
-        <h3>还没有定时任务</h3>
-        <p>日常执行直接在聊天里交给主 Agent；需要每天、每周或按间隔自动运行时，再在这里设置。</p>
+        <h3>还没有任务</h3>
+        <p>在聊天中交代一件事，或创建需要按时间运行的任务。</p>
         <button class="primary-button" onclick={openCreate}><Plus size={14} />新建定时任务</button>
       </div>
     {/each}

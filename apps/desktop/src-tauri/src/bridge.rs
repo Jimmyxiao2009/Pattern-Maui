@@ -1,10 +1,11 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     fs,
     io::Cursor,
     path::PathBuf,
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -156,29 +157,48 @@ fn handle_input(body: &str, freeze: &AtomicBool) -> Result<serde_json::Value, St
         }
         "key" => {
             let key_name = value.get("key").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            let key = match key_name.as_str() {
-                "enter" => Key::Return,
-                "tab" => Key::Tab,
-                "escape" | "esc" => Key::Escape,
-                "backspace" => Key::Backspace,
-                "delete" => Key::Delete,
-                "space" => Key::Space,
-                "up" => Key::UpArrow,
-                "down" => Key::DownArrow,
-                "left" => Key::LeftArrow,
-                "right" => Key::RightArrow,
-                "home" => Key::Home,
-                "end" => Key::End,
-                _ if key_name.chars().count() == 1 => Key::Unicode(key_name.chars().next().unwrap()),
-                _ => return Err(format!("不支持的按键: {key_name}")),
-            };
             let modifiers = value.get("modifiers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let modifier_keys: Vec<Key> = modifiers.iter().filter_map(|v| match v.as_str().unwrap_or("").to_lowercase().as_str() {
-                "ctrl" | "control" => Some(Key::Control), "alt" => Some(Key::Alt), "shift" => Some(Key::Shift), "meta" | "win" | "command" => Some(Key::Meta), _ => None,
+                "ctrl" | "control" => Some(Key::Control), "alt" => Some(Key::Alt), "shift" => Some(Key::Shift), "meta" | "win" | "command" | "super" => Some(Key::Meta), _ => None,
             }).collect();
-            for modifier in &modifier_keys { enigo.key(*modifier, Direction::Press).map_err(|e| e.to_string())?; }
-            enigo.key(key, Direction::Click).map_err(|e| e.to_string())?;
-            for modifier in modifier_keys.iter().rev() { enigo.key(*modifier, Direction::Release).map_err(|e| e.to_string())?; }
+            // Standalone Win/Meta is a primary key (open Start menu), not only a modifier.
+            if matches!(key_name.as_str(), "win" | "meta" | "super" | "command" | "windows") {
+                enigo.key(Key::Meta, Direction::Click).map_err(|e| e.to_string())?;
+            } else {
+                let key = match key_name.as_str() {
+                    "enter" | "return" => Key::Return,
+                    "tab" => Key::Tab,
+                    "escape" | "esc" => Key::Escape,
+                    "backspace" => Key::Backspace,
+                    "delete" => Key::Delete,
+                    "space" => Key::Space,
+                    "up" => Key::UpArrow,
+                    "down" => Key::DownArrow,
+                    "left" => Key::LeftArrow,
+                    "right" => Key::RightArrow,
+                    "home" => Key::Home,
+                    "end" => Key::End,
+                    "pageup" | "page_up" => Key::PageUp,
+                    "pagedown" | "page_down" => Key::PageDown,
+                    "f1" => Key::F1,
+                    "f2" => Key::F2,
+                    "f3" => Key::F3,
+                    "f4" => Key::F4,
+                    "f5" => Key::F5,
+                    "f6" => Key::F6,
+                    "f7" => Key::F7,
+                    "f8" => Key::F8,
+                    "f9" => Key::F9,
+                    "f10" => Key::F10,
+                    "f11" => Key::F11,
+                    "f12" => Key::F12,
+                    _ if key_name.chars().count() == 1 => Key::Unicode(key_name.chars().next().unwrap()),
+                    _ => return Err(format!("不支持的按键: {key_name}")),
+                };
+                for modifier in &modifier_keys { enigo.key(*modifier, Direction::Press).map_err(|e| e.to_string())?; }
+                enigo.key(key, Direction::Click).map_err(|e| e.to_string())?;
+                for modifier in modifier_keys.iter().rev() { enigo.key(*modifier, Direction::Release).map_err(|e| e.to_string())?; }
+            }
         }
         "scroll" => {
             let amount = value.get("amount").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -188,6 +208,117 @@ fn handle_input(body: &str, freeze: &AtomicBool) -> Result<serde_json::Value, St
         _ => return Err(format!("未知 input 类型: {kind}")),
     }
     Ok(json!({"ok": true}))
+}
+
+fn recovery_store_dir() -> PathBuf {
+    std::env::var_os("PATTERN_AGENTOS_STORE").map(PathBuf::from).unwrap_or_else(|| dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pattern")
+        .join("recovery"))
+}
+
+#[cfg(windows)]
+fn agentos_executable() -> Option<PathBuf> {
+    let configured = std::env::var_os("PATTERN_AGENTOS_EXE").map(PathBuf::from);
+    let bundled = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent().map(|dir| dir.join("resources").join("agentos.exe"))
+    });
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../../Core/artifacts/win-x64/agentos.exe");
+    configured
+        .filter(|path| path.is_file())
+        .or_else(|| bundled.filter(|path| path.is_file()))
+        .or_else(|| dev.is_file().then_some(dev))
+}
+
+#[cfg(not(windows))]
+fn agentos_executable() -> Option<PathBuf> { None }
+
+fn string_array(value: &Value, key: &str) -> Vec<String> {
+    value.get(key).and_then(Value::as_array).into_iter().flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn append_scopes(args: &mut Vec<String>, flag: &str, values: Vec<String>) {
+    for value in values {
+        args.push(flag.to_string());
+        args.push(value);
+    }
+}
+
+#[cfg(windows)]
+fn run_agentos(args: &[String]) -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    let executable = agentos_executable().ok_or_else(||
+        "AgentOS recovery runtime is not installed; set PATTERN_AGENTOS_EXE or bundle resources/agentos.exe".to_string())?;
+    fs::create_dir_all(recovery_store_dir()).map_err(|error| error.to_string())?;
+    let mut command = Command::new(&executable);
+    command.args(args).creation_flags(0x0800_0000);
+    let output = command.output().map_err(|error| format!("Could not launch {}: {error}", executable.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let payload: Value = serde_json::from_str(stdout.trim()).map_err(|error|
+        format!("AgentOS returned invalid JSON ({error}); exit={}; stderr={stderr}", output.status.code().unwrap_or(-1)))?;
+    Ok(json!({
+        "ok": output.status.success(),
+        "exitCode": output.status.code(),
+        "transaction": payload,
+        "stderr": stderr
+    }))
+}
+
+#[cfg(not(windows))]
+fn run_agentos(_: &[String]) -> Result<Value, String> {
+    Err("AgentOS recovery runtime is only available on Windows".into())
+}
+
+fn recovery_request(operation: &str, value: &Value) -> Result<Value, String> {
+    let store = recovery_store_dir().to_string_lossy().into_owned();
+    let mut args = vec![operation.to_string()];
+    match operation {
+        "begin" => {
+            append_scopes(&mut args, "--file-scope", string_array(value, "fileScopes"));
+            append_scopes(&mut args, "--registry-scope", string_array(value, "registryScopes"));
+            append_scopes(&mut args, "--service-scope", string_array(value, "serviceScopes"));
+            append_scopes(&mut args, "--scheduled-task-scope", string_array(value, "scheduledTaskScopes"));
+            args.extend(["--mode".into(), value.get("mode").and_then(Value::as_str).unwrap_or("critical").into()]);
+            args.extend(["--correlation".into(), value.get("taskId").and_then(Value::as_str).unwrap_or("pattern-task").into()]);
+        }
+        "prepare" | "commit" | "rollback" | "recover" | "status" => {
+            let id = value.get("transactionId").and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .ok_or_else(|| "transactionId must be a non-empty hexadecimal identifier".to_string())?;
+            args.push(id.to_string());
+            if operation == "rollback" && value.get("force").and_then(Value::as_bool).unwrap_or(false) {
+                args.push("--force".into());
+            }
+            if operation == "recover" {
+                args.push("--assume-exclusive".into());
+            }
+        }
+        "gc" => {
+            args.extend(["--max-transactions".into(), value.get("maxTransactions").and_then(Value::as_u64).unwrap_or(20).to_string()]);
+            args.extend(["--max-age-days".into(), value.get("maxAgeDays").and_then(Value::as_u64).unwrap_or(7).to_string()]);
+            args.extend(["--max-bytes".into(), value.get("maxBytes").and_then(Value::as_u64).unwrap_or(5 * 1024 * 1024 * 1024).to_string()]);
+        }
+        "list" => {}
+        _ => return Err("Unsupported recovery operation".into()),
+    }
+    args.extend(["--store".into(), store]);
+    run_agentos(&args)
+}
+
+fn recovery_response(request: &mut tiny_http::Request, operation: &str) -> Response<Cursor<Vec<u8>>> {
+    let body = read_body(request);
+    let value: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+    match recovery_request(operation, &value) {
+        Ok(payload) => json_response(payload),
+        Err(error) => Response::from_string(error).with_status_code(StatusCode(503)),
+    }
 }
 
 #[cfg(windows)]
@@ -471,6 +602,23 @@ pub fn start_bridge(notify: Arc<Mutex<Option<Box<dyn Fn(String, String) + Send>>
                 }
                 (Method::Get, "/foreground") => json_response(foreground_window()),
                 (Method::Get, "/power") => json_response(power_state()),
+                (Method::Get, "/recovery/capabilities") => {
+                    let executable = agentos_executable();
+                    json_response(json!({
+                        "available": executable.is_some(),
+                        "platform": if cfg!(windows) { "windows" } else { "unsupported" },
+                        "executable": executable.map(|path| path.to_string_lossy().into_owned()),
+                        "store": recovery_store_dir().to_string_lossy()
+                    }))
+                },
+                (Method::Post, "/recovery/begin") => recovery_response(&mut request, "begin"),
+                (Method::Post, "/recovery/prepare") => recovery_response(&mut request, "prepare"),
+                (Method::Post, "/recovery/commit") => recovery_response(&mut request, "commit"),
+                (Method::Post, "/recovery/rollback") => recovery_response(&mut request, "rollback"),
+                (Method::Post, "/recovery/recover") => recovery_response(&mut request, "recover"),
+                (Method::Post, "/recovery/status") => recovery_response(&mut request, "status"),
+                (Method::Post, "/recovery/list") => recovery_response(&mut request, "list"),
+                (Method::Post, "/recovery/gc") => recovery_response(&mut request, "gc"),
                 (Method::Get, "/accessibility/tree") => match uia::tree() {
                     Ok(value) => json_response(value),
                     Err(error) => Response::from_string(error).with_status_code(StatusCode(500)),
@@ -539,5 +687,45 @@ impl BridgeHandle {
 
     pub fn is_frozen(&self) -> bool {
         self.freeze.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_agentos_committed_transaction_can_restore_workspace() {
+        let root = std::env::temp_dir().join(format!("Pattern-AgentOS-{}", now_secs()));
+        let scope = root.join("scope");
+        let store = root.join("store");
+        fs::create_dir_all(&scope).unwrap();
+        let file = scope.join("state.txt");
+        fs::write(&file, "before").unwrap();
+        std::env::set_var("PATTERN_AGENTOS_STORE", &store);
+
+        let begun = recovery_request("begin", &json!({
+            "taskId": "rust-bridge-test",
+            "mode": "critical",
+            "fileScopes": [scope.to_string_lossy()]
+        })).unwrap();
+        assert_eq!(begun["ok"], true);
+        assert_eq!(begun["transaction"]["state"], "Active");
+        let transaction_id = begun["transaction"]["id"].as_str().unwrap().to_string();
+
+        fs::write(&file, "after").unwrap();
+        let prepared = recovery_request("prepare", &json!({"transactionId": transaction_id})).unwrap();
+        assert_eq!(prepared["transaction"]["state"], "Prepared");
+        let committed = recovery_request("commit", &json!({"transactionId": transaction_id})).unwrap();
+        assert_eq!(committed["ok"], true);
+        assert_eq!(committed["transaction"]["state"], "Committed");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "after");
+        let rolled_back = recovery_request("rollback", &json!({"transactionId": transaction_id})).unwrap();
+        assert_eq!(rolled_back["ok"], true);
+        assert_eq!(rolled_back["transaction"]["state"], "RolledBack");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "before");
+
+        std::env::remove_var("PATTERN_AGENTOS_STORE");
+        let _ = fs::remove_dir_all(root);
     }
 }

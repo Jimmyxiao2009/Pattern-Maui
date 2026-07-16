@@ -40,6 +40,9 @@
   let localEmbedding = $state(false);
   let plaaUrl = $state('');
   let saved = $state('');
+  let proactiveMode = $state<'new_chat' | 'inline'>(
+    ((localStorage.getItem('pattern-proactive-mode') as 'new_chat' | 'inline' | null) || 'new_chat')
+  );
   let autostartEnabled = $state(false);
   let autostartReady = $state(false);
   let proactiveEnabled = $state(false);
@@ -55,10 +58,12 @@
   let journalItems = $state<Array<{ts: number; line: string; tier?: number; kind?: string; taskId?: string; decision?: string}>>([]);
   let journalQuery = $state('');
   let enforceWorkspace = $state(true);
+  let requireRecoveryForWorkspaceWrites = $state(true);
   let autoApproveBelow = $state(2);
   let hardDenyAt = $state(3);
   let workspaceRoot = $state('');
   let tierGuide = $state<Array<{tier: number; label: string; meaning: string}>>([]);
+  let recoveryStatus = $state<{available:boolean;store?:string;transactionCount:number;openCount:number;error?:string}>({available:false,transactionCount:0,openCount:0});
   let watchEnabled = $state(false);
   let watchPaths = $state('');
   let watchExtensions = $state('.md, .txt, .json, .ts, .js, .svelte, .rs, .py');
@@ -241,6 +246,8 @@
       const journal = await runtime.request<any>({type:'journal.list', id:crypto.randomUUID(), limit:120, query: journalQuery || null});
       if (journal.type === 'journal.list.result') journalItems = journal.items;
       await loadSecurityPolicy();
+      const recovery = await runtime.request<any>({type:'recovery.status', id:crypto.randomUUID()});
+      if (recovery.type === 'recovery.status.result') recoveryStatus = recovery;
       const metrics = await runtime.request<any>({type:'model.metrics.get', id:crypto.randomUUID()});
       if (metrics.type === 'model.metrics') modelMetrics = metrics.metrics;
       await refreshModelCatalog();
@@ -396,6 +403,7 @@
       const res = await runtime.request<any>({type:'security.policy.get', id:crypto.randomUUID()});
       if (res.type === 'security.policy') {
         enforceWorkspace = res.policy.enforceWorkspace !== false;
+        requireRecoveryForWorkspaceWrites = res.policy.requireRecoveryForWorkspaceWrites !== false;
         autoApproveBelow = Number(res.policy.autoApproveBelow ?? 2);
         hardDenyAt = Number(res.policy.hardDenyAt ?? 3);
         workspaceRoot = res.policy.workspaceRoot || '';
@@ -411,6 +419,7 @@
         id:crypto.randomUUID(),
         policy:{
           enforceWorkspace,
+          requireRecoveryForWorkspaceWrites,
           autoApproveBelow,
           hardDenyAt,
           workspaceRoot: workspaceRoot.trim() || null,
@@ -418,6 +427,7 @@
       });
       if (res.type === 'security.policy') {
         enforceWorkspace = res.policy.enforceWorkspace;
+        requireRecoveryForWorkspaceWrites = res.policy.requireRecoveryForWorkspaceWrites;
         autoApproveBelow = res.policy.autoApproveBelow;
         hardDenyAt = res.policy.hardDenyAt;
         workspaceRoot = res.policy.workspaceRoot || '';
@@ -468,10 +478,10 @@ async function activatePersonaCard(card: Persona) {
           </div>
         </SettingRow>
         <h2>常驻行为</h2>
-        <SettingRow title="主动消息策略" desc="空闲时按此策略投递；忙碌（回复中/任务执行/项目页专注）会静默接收，不抢焦点">
+        <SettingRow title="主动消息策略" desc="点开主动消息时：新对话=单独预览（回复后才建对话）；轻插=塞进当前对话，不另开一条">
           <div class="segmented">
-            <button type="button" class:active={(localStorage.getItem('pattern-proactive-mode')||'new_chat')!=='inline'} onclick={() => { localStorage.setItem('pattern-proactive-mode','new_chat'); saved='主动消息：新建对话'; }}>新对话</button>
-            <button type="button" class:active={localStorage.getItem('pattern-proactive-mode')==='inline'} onclick={() => { localStorage.setItem('pattern-proactive-mode','inline'); saved='主动消息：轻插当前'; }}>轻插</button>
+            <button type="button" class:active={proactiveMode !== 'inline'} onclick={() => { proactiveMode = 'new_chat'; localStorage.setItem('pattern-proactive-mode','new_chat'); saved='主动消息：点开后单独预览/建对话'; }}>新对话</button>
+            <button type="button" class:active={proactiveMode === 'inline'} onclick={() => { proactiveMode = 'inline'; localStorage.setItem('pattern-proactive-mode','inline'); saved='主动消息：插入当前对话，不另开'; }}>轻插</button>
           </div>
         </SettingRow>
         <SettingRow title="忙碌时静默" desc="执行任务、生成回复或在项目页专注时，主动消息不抢窗"><span class="badge green">已启用</span></SettingRow>
@@ -480,7 +490,7 @@ async function activatePersonaCard(card: Persona) {
         <SettingRow title="单实例运行" desc="重复启动会唤起已有窗口，避免多个 sidecar"><span class="badge green">已启用</span></SettingRow>
         <SettingRow title="开机启动" desc="登录系统后自动启动 Pattern">
           {#if autostartReady}
-            <Toggle checked={autostartEnabled} onChange={setAutostart} />
+            <Toggle checked={autostartEnabled} label="开机启动" onChange={setAutostart} />
           {:else}
             <span class="badge dim">不可用</span>
           {/if}
@@ -522,7 +532,7 @@ async function activatePersonaCard(card: Persona) {
             <div class="model-usage-row"><div><strong>默认模型</strong><small>用于新对话、主 Agent 和最终回复</small></div><select bind:value={model}>{#each modelChoices(model) as item}<option value={item}>{item}</option>{/each}</select></div>
             <div class="model-usage-row"><div><strong>独立规划模型</strong><small>用于拆解、路由和需要低成本判断的步骤</small></div><select bind:value={agentModel}><option value="">使用默认模型</option>{#each modelChoices(agentModel) as item}<option value={item}>{item}</option>{/each}</select></div>
             <div class="model-usage-row"><div><strong>子代理模型</strong><small>明确要求干活时使用；留空则自动复用默认模型</small></div><select bind:value={executorModel}><option value="">使用默认模型</option>{#each modelChoices(executorModel) as item}<option value={item}>{item}</option>{/each}</select></div>
-            <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。"><Toggle checked={executorVision} onChange={(value)=>executorVision=value}/></SettingRow>
+            <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。"><Toggle checked={executorVision} label="执行模型支持图像" onChange={(value)=>executorVision=value}/></SettingRow>
           </div>
           <div class="model-use-actions"><button class="primary-button" onclick={saveModel}><Save size={14} />保存使用设置</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
           <h2>模型用量</h2>
@@ -553,7 +563,7 @@ async function activatePersonaCard(card: Persona) {
         {/if}
         <h2>本地语义记忆</h2>
         <SettingRow title="BGE Small 中文向量" desc="首次使用会下载约 60MB 本地模型；已有记忆会在新写入时逐步使用新向量。">
-          <Toggle checked={localEmbedding} onChange={(value) => localEmbedding = value} />
+          <Toggle checked={localEmbedding} label="启用本地语义记忆" onChange={(value) => localEmbedding = value} />
         </SettingRow>
         <button class="quiet-button" onclick={saveModel}><Save size={14}/>保存本地向量设置</button>
         <h2>PLAA 情感状态</h2>
@@ -562,10 +572,10 @@ async function activatePersonaCard(card: Persona) {
       {:else if tab === 'proactive'}
         <h2>主动性</h2>
         <SettingRow title="深夜主动提醒" desc="达到设定时间后，同话题当天最多一次">
-          <Toggle checked={proactiveEnabled} onChange={(value) => saveProactive(value, bedtimeHour, proactivePaused)} />
+          <Toggle checked={proactiveEnabled} label="启用深夜主动提醒" onChange={(value) => saveProactive(value, bedtimeHour, proactivePaused)} />
         </SettingRow>
         <SettingRow title="暂停主动性" desc="托盘也可切换；暂停后不发起新的主动消息">
-          <Toggle checked={proactivePaused} onChange={(value) => saveProactive(proactiveEnabled, bedtimeHour, value)} />
+          <Toggle checked={proactivePaused} label="暂停主动性" onChange={(value) => saveProactive(proactiveEnabled, bedtimeHour, value)} />
         </SettingRow>
         <SettingRow title="提醒时间" desc="本地时间到达该小时后触发">
           <select class="compact-select" bind:value={bedtimeHour} onchange={() => saveProactive(proactiveEnabled, bedtimeHour, proactivePaused)}>
@@ -605,7 +615,7 @@ async function activatePersonaCard(card: Persona) {
       {:else if tab === 'filewatch'}
         <h2>文件系统感知</h2>
         <p class="settings-note">只把路径和变化类型先发给 AI 判断；AI 认为有助于了解你时才读取文件。不监视未列出的目录。</p>
-        <SettingRow title="启用感知" desc="监视下方目录的新建与修改"><Toggle checked={watchEnabled} onChange={(v)=>watchEnabled=v}/></SettingRow>
+        <SettingRow title="启用感知" desc="监视下方目录的新建与修改"><Toggle checked={watchEnabled} label="启用文件感知" onChange={(v)=>watchEnabled=v}/></SettingRow>
         <div class="settings-form">
           <label>监视目录（每行一个绝对路径）<textarea bind:value={watchPaths} rows="5" placeholder="C:\\Users\\you\\Documents\\Notes"></textarea></label>
           <label>允许读取的扩展名<input bind:value={watchExtensions} /></label>
@@ -643,7 +653,10 @@ async function activatePersonaCard(card: Persona) {
         <h2>执行安全（约束层）</h2>
         <p class="settings-note">学自网安向管家的方法论：默认不信任越界执行。这是底层约束，不替代陪伴/编码体验。</p>
         <SettingRow title="工作区隔离" desc="开启后，项目路径外的写/执行类访问会被拒绝">
-          <Toggle checked={enforceWorkspace} onChange={(v) => enforceWorkspace = v} />
+          <Toggle checked={enforceWorkspace} label="启用工作区隔离" onChange={(v) => enforceWorkspace = v} />
+        </SettingRow>
+        <SettingRow title="工作区恢复强制" desc="Windows 上 AgentOS 或有效工作区 scope 不可用时，拒绝执行可变更动作">
+          <Toggle checked={requireRecoveryForWorkspaceWrites} label="要求 AgentOS 保护工作区写入" onChange={(v) => requireRecoveryForWorkspaceWrites = v} />
         </SettingRow>
         <div class="settings-form">
           <label>当前信任根（可空；打开项目聊天时会自动绑定）
@@ -664,6 +677,7 @@ async function activatePersonaCard(card: Persona) {
           {/each}
         {/if}
         <h2>数据位置</h2>
+        <SettingRow title="AgentOS 恢复运行时" desc={recoveryStatus.available ? `${recoveryStatus.store || '%LOCALAPPDATA%/pattern/recovery'} · ${recoveryStatus.transactionCount} 个事务，${recoveryStatus.openCount} 个待处理` : (recoveryStatus.error || '未安装')}><span class="badge" class:green={recoveryStatus.available && recoveryStatus.openCount === 0} class:amber={recoveryStatus.available && recoveryStatus.openCount > 0} class:dim={!recoveryStatus.available}>{recoveryStatus.available ? (recoveryStatus.openCount ? '需要处理' : '已连接') : '不可用'}</span></SettingRow>
         <SettingRow title="本地数据" desc="%LOCALAPPDATA%/pattern · 人格、记忆、会话、journal"><span class="badge green">仅本机</span></SettingRow>
         <SettingRow title="API Key" desc="Windows Credential Manager · 不写入配置文件"><span class="badge green">系统保护</span></SettingRow>
         <h2>感知权限</h2>

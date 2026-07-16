@@ -12,7 +12,7 @@
     initial?: MemoryItem;
   } = $props();
 
-  const seed = initial;
+  const seed = (() => initial)();
   let category = $state<MemoryCategory>((seed?.category as MemoryCategory) || '事实');
   let text = $state(seed?.text || '');
   let importance = $state<1 | 2 | 3>(

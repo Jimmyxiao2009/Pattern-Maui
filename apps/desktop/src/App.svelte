@@ -27,7 +27,7 @@
     {id: 'project', label: '项目', icon: FolderGit2},
     {id: 'conversations', label: '管理', icon: MessagesSquare},
     {id: 'memory', label: '记忆', icon: Layers3},
-    {id: 'tasks', label: '定时', icon: Zap},
+    {id: 'tasks', label: '任务', icon: Zap},
     {id: 'proactive', label: '主动', icon: BellRing},
     {id: 'workflows', label: '技能', icon: Workflow},
     {id: 'mcp', label: '工具', icon: Wrench},
@@ -61,12 +61,16 @@
   let memoryCount = $state(0);
   let proactiveCount = $state(0);
   let proactiveInbox = $state<Array<{id: string; body: string; type?: string; reason?: string; origin?: 'ai' | 'system'; state?: string; chainId?: string; ts?: number}>>([]);
+  let proactivePreview = $state<{id: string; body: string; type?: string; reason?: string; origin?: 'ai' | 'system'; chainId?: string} | null>(null);
   let lastConsolidateAt = $state<number | null>(null);
   let memorySearchTimer: ReturnType<typeof setTimeout>;
   let taskDraft = $state<{title: string; detail: string; nonce: number} | null>(null);
   let attachmentInput = $state<HTMLInputElement>();
   let agentState = $state<'idle' | 'thinking' | 'executing' | 'paused' | 'approval'>('idle');
   let activeSlot = $state<'companion' | 'executor'>('companion');
+  // When enabled, desktop-action turns may spawn/internalize a sub-agent worker.
+  // When disabled, primary agent still acts (tools/desktop) but does not spawn sub-agents.
+  let allowSubAgents = $state(typeof localStorage === 'undefined' ? true : localStorage.getItem('pattern-allow-sub-agents') !== '0');
   let showProjectDialog = $state(false);
   let projectNameDraft = $state('');
   let projectPathDraft = $state('');
@@ -86,6 +90,7 @@
   let clock = $state(Date.now());
   let redefiningPersona = $state(false);
   let personaEditorMode = $state<'redefine' | 'new'>('redefine');
+  let editingMessageId = $state('');
 
   const activeConversation = $derived(conversations.find((item) => item.id === activeConversationId) || null);
   const activeProject = $derived(projects.find((item) => item.id === activeProjectId) || null);
@@ -132,10 +137,33 @@
 
   function persistConversations() {
     localStorage.setItem('pattern-conversations', JSON.stringify(conversations));
+    persistWorkspaceState();
   }
 
   function persistProjects() {
     localStorage.setItem('pattern-projects', JSON.stringify(projects));
+    persistWorkspaceState();
+    void syncProjectsToSidecar();
+  }
+
+  async function syncProjectsToSidecar() {
+    try {
+      if (!(await runtime.connect())) return;
+      await runtime.request({
+        type: 'projects.sync',
+        id: crypto.randomUUID(),
+        projects: projects.map((item) => ({id: item.id, name: item.name, path: item.path})),
+      } as any);
+    } catch (error) {
+      console.error('[pattern] projects.sync failed', error);
+    }
+  }
+
+  function persistWorkspaceState() {
+    if (!(window as any).__TAURI_INTERNALS__) return;
+    void import('@tauri-apps/api/core')
+      .then(({invoke}) => invoke('save_workspace_state', {conversations, projects}))
+      .catch((error) => console.error('[pattern] workspace persistence failed', error));
   }
 
   function pushMessageEvent(
@@ -143,8 +171,13 @@
     kind: string,
     eventText: string,
     extra: Partial<import('./lib/types').ChatMessageEvent> = {},
+    conversationId = activeConversationId,
   ) {
-    const target = messages.find((message) => message.id === messageId);
+    const conversation = conversationId && conversationId !== activeConversationId
+      ? conversations.find((item) => item.id === conversationId)
+      : null;
+    const messageList = conversation ? conversation.messages : messages;
+    const target = messageList.find((message) => message.id === messageId);
     if (!target) return;
     const event = {
       id: extra.id || crypto.randomUUID(),
@@ -165,7 +198,12 @@
         const next = [...(target.events || [])];
         next[existing] = {...next[existing], ...event};
         target.events = next;
-        messages = [...messages];
+        if (conversation) {
+          conversation.messages = [...messageList];
+          conversation.updatedAt = Date.now();
+          conversations = [...conversations];
+          persistConversations();
+        } else messages = [...messages];
         return;
       }
     }
@@ -173,23 +211,48 @@
     const last = target.events?.at(-1);
     if (last && !event.stepId && last.kind === event.kind && last.text === event.text && last.status === event.status) {
       last.ts = event.ts;
-      messages = [...messages];
+      if (conversation) {
+        conversation.messages = [...messageList];
+        conversation.updatedAt = Date.now();
+        conversations = [...conversations];
+        persistConversations();
+      } else messages = [...messages];
       return;
     }
     target.events = [...(target.events || []), event];
+    if (conversation) {
+      conversation.messages = [...messageList];
+      conversation.updatedAt = Date.now();
+      conversations = [...conversations];
+      persistConversations();
+    } else messages = [...messages];
+  }
+
+  function settleMessageEvents(messageId: string, status: 'done' | 'failed' | 'skipped') {
+    const target = messages.find((message) => message.id === messageId);
+    if (!target?.events?.length) return;
+    // Leave task-bound live steps alone — syncTaskTimeline owns those.
+    target.events = target.events.map((event) => {
+      if (event.taskId && (event.status === 'running' || event.status === 'pending' || event.status === 'awaiting_approval')) {
+        return event;
+      }
+      if (event.status === 'running' || event.status === 'pending' || !event.status) {
+        return {...event, status};
+      }
+      return event;
+    });
     messages = [...messages];
   }
 
   function syncTaskTimeline(task: any) {
-    const target =
-      [...messages].reverse().find((m) => m.role === 'assistant' && m.taskCard?.taskId === task.id) ||
-      [...messages].reverse().find((m) => m.role === 'assistant' && !m.taskCard);
+    const conversationId = task.conversationId || activeConversationId;
+    const taskConversation = conversationId && conversationId !== activeConversationId
+      ? conversations.find((item) => item.id === conversationId)
+      : null;
+    const messageList = taskConversation ? taskConversation.messages : messages;
+    const target = [...messageList].reverse().find((m) => m.role === 'assistant' && m.taskCard?.taskId === task.id);
     if (!target) return;
-    if (!target.taskCard) {
-      target.taskCard = {taskId: task.id, title: task.title, status: task.status, detail: task.detail};
-    } else {
-      target.taskCard = {...target.taskCard, status: task.status, title: task.title, detail: task.detail || target.taskCard.detail};
-    }
+    target.taskCard = {...target.taskCard!, status: task.status, title: task.title, detail: task.detail || target.taskCard?.detail};
     const steps = Array.isArray(task.steps) ? task.steps : [];
     for (const step of steps) {
       pushMessageEvent(target.id, step.action === 'mcp' ? 'mcp' : 'task', step.detail || step.action || '步骤', {
@@ -200,11 +263,12 @@
         status: step.status,
         tier: step.tier,
         receipt: step.receipt,
-        ts: step.ts || Date.now(),
-      });
+        ts: step.ts ? (step.ts < 10_000_000_000 ? step.ts * 1000 : step.ts) : Date.now(),
+      }, conversationId);
     }
     // Task-level status pulse
     pushMessageEvent(target.id, 'task', `任务状态 · ${task.status}: ${task.title}`, {
+      stepId: `task:${task.id}:status`,
       taskId: task.id,
       status: ['done', 'failed', 'cancelled'].includes(task.status)
         ? task.status === 'done'
@@ -218,18 +282,34 @@
             ? 'running'
             : 'pending',
       ts: Date.now(),
-    });
+    }, conversationId);
     // Agent results if present
     for (const result of task.agentResults || []) {
       pushMessageEvent(target.id, 'agent', `${result.skillId || 'agent'}: ${(result.output || '').slice(0, 180)}`, {
+        stepId: `task:${task.id}:agent:${result.skillId || 'agent'}`,
         status: result.status === 'failed' ? 'failed' : 'done',
         taskId: task.id,
         receipt: result.output,
         ts: result.ts || Date.now(),
-      });
+      }, conversationId);
     }
-    messages = [...messages];
-    void persistSession();
+    if (['done', 'failed', 'cancelled'].includes(task.status)) {
+      const lastReceipt = [...steps].reverse().find((step: any) => step.receipt)?.receipt;
+      target.text = task.status === 'done'
+        ? `已完成：${task.title}${lastReceipt ? `\n\n${lastReceipt}` : ''}`
+        : task.status === 'failed'
+          ? `执行失败：${task.title}\n\n${task.error || '没有可用的错误详情'}`
+          : `已终止：${task.title}`;
+    }
+    if (taskConversation) {
+      taskConversation.messages = [...messageList];
+      taskConversation.updatedAt = Date.now();
+      conversations = [...conversations];
+      persistConversations();
+    } else {
+      messages = [...messages];
+      void persistSession();
+    }
   }
 
   async function expandDirectory(node: FileNode) {
@@ -270,10 +350,21 @@
     }
   }
 
-  function attachProjectPath(node: FileNode) {
-    if (!attachedPaths.includes(node.path)) attachedPaths = [...attachedPaths, node.path];
-    draft = `${draft ? `${draft}\n` : ''}@${node.path}`;
-    notify(`已附加 ${node.name}`);
+  async function attachProjectPath(node: FileNode) {
+    if (node.kind !== 'file') return;
+    if (!(window as any).__TAURI_INTERNALS__) {
+      notify('浏览器预览无法读取该文件');
+      return;
+    }
+    try {
+      const {invoke} = await import('@tauri-apps/api/core');
+      const content = await invoke<string>('read_text_file', {path: node.path, maxBytes: 64_000});
+      if (!attachedPaths.includes(node.path)) attachedPaths = [...attachedPaths, node.path];
+      draft = `${draft ? `${draft}\n\n` : ''}[已附加项目文件：${node.name}]\n${content}`;
+      notify(`已读取并附加 ${node.name}`);
+    } catch (error) {
+      notify(`附加失败：${error}`);
+    }
   }
 
   async function inspectProjectDiff() {
@@ -359,30 +450,62 @@
   }
 
 
-  function stopGeneration() {
-    if (streamingId) runtime.abortChat(streamingId);
+  async function stopGeneration() {
+    const id = streamingId;
+    if (id) runtime.abortChat(id);
     replying = false;
     agentState = 'idle';
-    if (streamingId) pushMessageEvent(streamingId, 'status', '已停止生成', {status: 'skipped'});
+    if (id) {
+      const target = messages.find((message) => message.id === id);
+      if (target) {
+        target.streaming = false;
+        if (!target.text?.trim() && !target.error) target.text = '（已停止）';
+      }
+      settleMessageEvents(id, 'skipped');
+      pushMessageEvent(id, 'status', '已停止生成', {status: 'skipped', stepId: `chat:${id}:status`});
+    }
     streamingId = '';
-    void persistSession();
+    attachedPaths = [];
+    await persistSession();
   }
 
   async function retryAssistant(messageId: string) {
     const idx = messages.findIndex((message) => message.id === messageId);
     if (idx < 0) return;
-    let userText = lastUserText;
+    let userText = '';
+    let userIndex = -1;
     for (let i = idx - 1; i >= 0; i--) {
       if (messages[i].role === 'user') {
         userText = messages[i].text;
+        userIndex = i;
         break;
       }
     }
-    if (!userText) return;
-    // Remove both the failed answer and the preceding user turn; sendMessage adds it once.
-    messages = messages.slice(0, Math.max(0, idx - 1));
+    if (!userText || userIndex < 0) return;
+    messages = messages.slice(0, userIndex);
     draft = userText;
     await sendMessage();
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.text);
+      notify('已复制消息');
+    } catch {
+      notify('复制失败，请手动选择文本');
+    }
+  }
+
+  function editUserMessage(message: ChatMessage) {
+    if (replying || message.role !== 'user') return;
+    editingMessageId = message.id;
+    draft = message.text;
+    notify('修改后发送，将从这条消息继续对话');
+  }
+
+  function cancelMessageEdit() {
+    editingMessageId = '';
+    draft = '';
   }
 
   function isUserBusy() {
@@ -486,19 +609,111 @@
     notify(`${item.origin === 'system' ? '系统提醒' : 'AI 主动消息'}已进入收件箱`);
   }
 
+  function proactiveTitle(item: {body: string; type?: string; reason?: string; origin?: 'ai' | 'system'}) {
+    return conversationTitleFromText(item.reason || item.type || item.body, item.origin === 'system' ? '提醒' : '主动消息');
+  }
+
+  async function markProactiveState(itemId: string, state: 'read' | 'dismissed' | 'replied') {
+    if (state === 'dismissed') {
+      proactiveInbox = proactiveInbox.filter((entry) => entry.id !== itemId);
+      if (proactivePreview?.id === itemId) proactivePreview = null;
+    } else {
+      proactiveInbox = proactiveInbox.map((entry) => entry.id === itemId ? {...entry, state} : entry);
+    }
+    if (await runtime.connect()) {
+      void runtime.request({type: 'proactive.inbox.mark', id: crypto.randomUUID(), itemId, state});
+    }
+  }
+
+  async function dismissProactiveInboxItem(item: {id: string; chainId?: string; origin?: 'ai' | 'system'}, options: {quiet?: boolean} = {}) {
+    if (item.origin === 'ai' && item.chainId && await runtime.connect()) {
+      void runtime.request({type: 'proactive.chain.cancel', id: crypto.randomUUID(), chainId: item.chainId});
+    }
+    await markProactiveState(item.id, 'dismissed');
+    const orphan = conversations.find((conversation) =>
+      conversation.messages.length === 1 && conversation.messages[0]?.id === item.id,
+    );
+    if (orphan) {
+      conversations = conversations.filter((conversation) => conversation.id !== orphan.id);
+      if (activeConversationId === orphan.id) {
+        activeConversationId = '';
+        messages = [];
+      }
+      persistConversations();
+    }
+    if (!options.quiet) notify('已忽略这条主动消息');
+  }
+
+  async function dismissAllProactiveInbox() {
+    const items = proactiveInbox.filter((item) => item.state !== 'dismissed' && item.state !== 'replied');
+    if (!items.length) {
+      notify('收件箱已经是空的');
+      return;
+    }
+    for (const item of items) {
+      await dismissProactiveInboxItem(item, {quiet: true});
+    }
+    if (proactivePreview && items.some((item) => item.id === proactivePreview?.id)) {
+      proactivePreview = null;
+    }
+    notify(items.length === 1 ? '已忽略 1 条主动消息' : `已全部忽略 ${items.length} 条主动消息`);
+  }
+
   async function openProactiveInboxItem(item: {id: string; body: string; type?: string; reason?: string; origin?: 'ai' | 'system'; chainId?: string}) {
-    const time = new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
-    const conversation = createConversation('global');
-    conversation.messages = [{id: item.id || crypto.randomUUID(), role: 'assistant', text: item.body, time, proactive: item.type || '主动'}];
-    conversation.title = conversationTitleFromText(item.reason || item.type || item.body, item.origin === 'system' ? '提醒' : '主动消息');
-    conversations = [conversation, ...conversations];
-    activeConversationId = conversation.id;
-    messages = [...conversation.messages];
+    // Only reopen a real conversation if the user already replied there.
+    const existing = conversations.find((conversation) =>
+      conversation.messages.some((message) => message.id === item.id) &&
+      conversation.messages.some((message) => message.role === 'user'),
+    );
+    if (existing) {
+      proactivePreview = null;
+      await openConversation(existing.id);
+      await markProactiveState(item.id, 'read');
+      return;
+    }
+
+    const mode = (localStorage.getItem('pattern-proactive-mode') || 'new_chat') as 'new_chat' | 'inline';
+    const proactiveMessage = {
+      id: item.id || crypto.randomUUID(),
+      role: 'assistant' as const,
+      text: item.body,
+      time: new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}),
+      proactive: item.type || '主动',
+    };
+
+    // 轻插：插入当前/最近全局对话，不新建会话。
+    if (mode === 'inline') {
+      let conversation = activeConversationId
+        ? conversations.find((entry) => entry.id === activeConversationId && !entry.archived)
+        : undefined;
+      if (!conversation) conversation = conversations.find((entry) => !entry.archived && entry.scope === 'global');
+      if (conversation) {
+        if (replying) await stopGeneration();
+        if (!conversation.messages.some((message) => message.id === item.id)) {
+          conversation.messages = [...conversation.messages, proactiveMessage];
+        }
+        conversation.updatedAt = Date.now();
+        if (!conversation.title || conversation.title === '新对话') conversation.title = proactiveTitle(item);
+        conversations = [...conversations];
+        proactivePreview = null;
+        activeConversationId = conversation.id;
+        messages = [...conversation.messages];
+        activeView = 'chat';
+        persistConversations();
+        await markProactiveState(item.id, 'read');
+        await scrollConversationToEnd();
+        return;
+      }
+    }
+
+    // 新对话（默认）：懒预览，回复后才真正创建对话。
+    if (replying) await stopGeneration();
+    proactivePreview = item;
+    activeConversationId = '';
+    messages = [proactiveMessage];
     activeView = 'chat';
-    persistConversations();
-    if (await runtime.connect()) void runtime.request({type:'proactive.inbox.mark', id:crypto.randomUUID(), itemId:item.id, state:'read'});
-    proactiveInbox = proactiveInbox.map((entry) => entry.id === item.id ? {...entry, state:'read'} : entry);
-    await persistSession();
+    await markProactiveState(item.id, 'read');
+    await scrollConversationToEnd();
   }
 
   async function refreshMemories() {
@@ -559,6 +774,10 @@
         try {
           const stored = JSON.parse(localStorage.getItem('pattern-conversations') || '[]') as Conversation[];
           conversations = stored.map((item) => normalizeConversation(item));
+          if (!replying) {
+            const current = conversations.find((item) => item.id === activeConversationId);
+            if (current) messages = [...current.messages];
+          }
         } catch { /* malformed local state is ignored */ }
       };
       (window as any).__patternConversationChannel?.close?.();
@@ -581,11 +800,22 @@
         activeProjectId = projects[0]?.id || '';
       }
     } catch { /* start with no projects */ }
+    void syncProjectsToSidecar();
 
     if ((window as any).__TAURI_INTERNALS__) {
       try {
         const {invoke} = await import('@tauri-apps/api/core');
         persona = await invoke<Persona | null>('load_persona');
+        const workspaceState = await invoke<{conversations?: Conversation[]; projects?: Project[]} | null>('load_workspace_state');
+        if (workspaceState?.conversations?.length) {
+          conversations = workspaceState.conversations.map((item) => normalizeConversation(item));
+          localStorage.setItem('pattern-conversations', JSON.stringify(conversations));
+        }
+        if (workspaceState?.projects?.length) {
+          projects = workspaceState.projects.map((item) => normalizeProject(item));
+          activeProjectId = projects[0]?.id || '';
+          localStorage.setItem('pattern-projects', JSON.stringify(projects));
+        }
         const session = await invoke<ChatMessage[] | null>('load_session');
         if (session?.length && !conversations.length) {
           const conversation = createConversation('global');
@@ -660,6 +890,7 @@
         activeProjectId = preferred.projectId;
         activeView = 'project';
       }
+      void scrollConversationToEnd();
     }
 
     if (!persona && saved) persona = JSON.parse(saved);
@@ -732,8 +963,38 @@
     }, 2200);
   }
 
-  function scrollToBottom() {
-    if (stream) stream.scrollTo({top: stream.scrollHeight, behavior: 'smooth'});
+  function setAllowSubAgents(next: boolean) {
+    allowSubAgents = next;
+    try {
+      localStorage.setItem('pattern-allow-sub-agents', next ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+    notify(next ? '已启用子 Agent：主 Agent 可派生子代理处理复杂工作' : '已关闭子 Agent：主 Agent 自己调用工具并执行');
+  }
+
+  function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+    const el = stream;
+    if (!el) return;
+    const top = el.scrollHeight;
+    if (behavior === 'smooth') el.scrollTo({top, behavior: 'smooth'});
+    else el.scrollTop = top;
+    // Fallback when the outer view is still the scroller (legacy layout / intermediate paint).
+    const parent = el.parentElement;
+    if (parent && parent.scrollHeight > parent.clientHeight + 8) {
+      if (behavior === 'smooth') parent.scrollTo({top: parent.scrollHeight, behavior: 'smooth'});
+      else parent.scrollTop = parent.scrollHeight;
+    }
+  }
+
+  async function scrollConversationToEnd() {
+    // Wait for messages + the active chat-stream bind:this to settle after view/conversation switches.
+    await tick();
+    scrollToBottom('auto');
+    requestAnimationFrame(() => {
+      scrollToBottom('auto');
+      requestAnimationFrame(() => scrollToBottom('auto'));
+    });
   }
 
   async function persistSession() {
@@ -766,6 +1027,8 @@
       notify('请先选择一个项目');
       return;
     }
+    if (replying) await stopGeneration();
+    proactivePreview = null;
     activeConversationId = '';
     messages = [];
     if (scope === 'project' && projectId) {
@@ -785,8 +1048,11 @@
   }
 
   async function openConversation(id: string) {
+    if (id === activeConversationId && !proactivePreview) return;
+    if (replying) await stopGeneration();
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation) return;
+    proactivePreview = null;
     activeConversationId = id;
     messages = [...conversation.messages];
     if (conversation.scope === 'project' && conversation.projectId) {
@@ -798,9 +1064,11 @@
       activeView = 'chat';
     }
     await persistSession();
+    await scrollConversationToEnd();
   }
 
   async function openProject(id: string) {
+    if (replying) await stopGeneration();
     const project = projects.find((item) => item.id === id);
     if (!project) return;
     activeProjectId = id;
@@ -812,6 +1080,7 @@
     activeConversationId = conversation?.id || '';
     messages = conversation ? [...conversation.messages] : [];
     await loadDirectoryTree(project.path);
+    await scrollConversationToEnd();
   }
 
   function openNewProjectDialog() {
@@ -850,23 +1119,30 @@
   }
 
   async function deleteConversation(id: string) {
-    if (conversations.length <= 1) return;
     conversations = conversations.filter((item) => item.id !== id);
     if (activeConversationId === id) {
       const next = conversations.find((item) => !item.archived && item.scope === 'global')
-        || conversations.find((item) => !item.archived)
-        || conversations[0];
-      activeConversationId = next.id;
-      messages = [...next.messages];
-      if (next.scope === 'project' && next.projectId) {
-        activeProjectId = next.projectId;
-        activeView = 'project';
+        || conversations.find((item) => !item.archived);
+      if (next) {
+        activeConversationId = next.id;
+        messages = [...next.messages];
+        if (next.scope === 'project' && next.projectId) {
+          activeProjectId = next.projectId;
+          activeView = 'project';
+        } else {
+          activeView = 'chat';
+        }
       } else {
+        proactivePreview = null;
+        activeConversationId = '';
+        messages = [];
         activeView = 'chat';
       }
     }
     persistConversations();
     await persistSession();
+    await scrollConversationToEnd();
+    notify('对话已删除');
   }
 
   async function addMemory(item: MemoryItem) {
@@ -920,23 +1196,43 @@
     notify('记忆已移入历史');
   }
 
-  async function createExecutorTask(text: string, options: {announce?: boolean; openTasks?: boolean} = {}) {
+  async function createExecutorTask(text: string, options: {announce?: boolean; openTasks?: boolean; openReview?: boolean} = {}) {
     const title = taskTitleFromText(text);
     const detail = text;
+    if (options.announce !== false && !activeConversationId) {
+      const scope: 'global' | 'project' = activeView === 'project' && activeProject ? 'project' : 'global';
+      const conversation = createConversation(scope, scope === 'project' ? activeProject?.id : undefined);
+      conversations = [conversation, ...conversations];
+      activeConversationId = conversation.id;
+      persistConversations();
+    }
     if (!(await runtime.connect())) {
-      notify('运行时未连接，暂时不能派给子代理');
+      notify('运行时未连接，主 Agent 暂时无法执行桌面操作');
+      draft = text;
       return null;
     }
+    // Primary agent owns the turn; executor worker runs underneath, without forcing a page switch.
     activeSlot = 'executor';
     agentState = 'executing';
-    const created = await runtime.request<any>({
-      type: 'task.create',
-      id: crypto.randomUUID(),
-      title,
-      detail,
-    });
+    let created: any;
+    try {
+      created = await runtime.request<any>({
+        type: 'task.create',
+        id: crypto.randomUUID(),
+        title,
+        detail,
+        conversationId: activeConversationId || undefined,
+        workspace: activeConversation?.scope === 'project' ? activeProject?.path : undefined,
+        projectName: activeConversation?.scope === 'project' ? activeProject?.name : undefined,
+      });
+    } catch (error) {
+      agentState = 'idle';
+      draft = text;
+      notify(`主 Agent 启动执行失败：${formatRuntimeError(error, {isTauri: !!(window as any).__TAURI_INTERNALS__})}`);
+      return null;
+    }
     const tasks = created?.type === 'task.list.result' ? created.tasks : [];
-    const createdTask = [...tasks].reverse().find((item: any) => item.title === title) || tasks.at(-1);
+    const createdTask = created?.createdTask || tasks.find((item: any) => item.conversationId === activeConversationId && item.title === title);
     const taskId = createdTask?.id || crypto.randomUUID();
     const status = createdTask?.status || 'queued';
     if (options.announce !== false) {
@@ -945,17 +1241,19 @@
       messages.push({
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: `已交给子代理：${title}\n主对话只保留结果摘要；可在下方任务卡片或审查窗跟踪进度。`,
+        text: ['done', 'failed', 'cancelled'].includes(status)
+          ? status === 'done' ? `已完成：${title}` : status === 'failed' ? `执行失败：${title}\n\n${createdTask?.error || '没有可用的错误详情'}` : `已终止：${title}`
+          : `好的，我来处理：${title}\n已开始桌面执行，进度会同步在这条对话里。`,
         time,
-        proactive: '子代理',
         taskCard: {taskId, title, status, detail},
-        events: [{id: crypto.randomUUID(), kind: 'task', text: `任务已创建 · ${status}`, ts: Date.now(), status: status === 'running' ? 'running' : 'pending', taskId}],
+        events: [{id: crypto.randomUUID(), stepId: `task:${taskId}:status`, kind: 'task', text: `执行状态 · ${status}`, ts: Date.now(), status: status === 'running' ? 'running' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'pending', taskId}],
       });
-      void persistSession();
+      await persistSession();
     }
-    if (options.openTasks !== false) activeView = 'tasks';
-    notify('已交给子代理并创建任务');
-    if ((window as any).__TAURI_INTERNALS__) {
+    // Stay in chat by default. Tasks page is only for inspection/management.
+    if (options.openTasks) activeView = 'tasks';
+    notify('主 Agent 已开始执行');
+    if (options.openReview && (window as any).__TAURI_INTERNALS__) {
       const {invoke} = await import('@tauri-apps/api/core');
       try {
         await invoke('show_review', {taskId});
@@ -978,16 +1276,25 @@
       }
       target.streaming = false;
     }
+    settleMessageEvents(id, isError ? 'failed' : 'done');
     replying = false;
     agentState = 'idle';
     streamingId = '';
+    attachedPaths = [];
     await persistSession();
   }
 
   async function sendMessage() {
     const textValue = draft.trim();
     if (!textValue || replying) return;
-    if (shouldTransferToExecutor(textValue)) {
+    if (editingMessageId) {
+      const editIndex = messages.findIndex((message) => message.id === editingMessageId && message.role === 'user');
+      if (editIndex >= 0) messages = messages.slice(0, editIndex);
+      editingMessageId = '';
+    }
+    // Desktop work always belongs to the primary agent.
+    // Sub-agents are optional workers that can be spawned only when enabled.
+    if (allowSubAgents && shouldTransferToExecutor(textValue)) {
       draft = '';
       await createExecutorTask(textValue);
       return;
@@ -995,11 +1302,17 @@
     if (!activeConversationId) {
       const scope: 'global' | 'project' = activeView === 'project' && activeProject ? 'project' : 'global';
       const conversation = createConversation(scope, scope === 'project' ? activeProject?.id : undefined);
+      if (proactivePreview) {
+        conversation.title = proactiveTitle(proactivePreview);
+        conversation.messages = [...messages];
+      }
       conversations = [conversation, ...conversations];
       activeConversationId = conversation.id;
       persistConversations();
     }
-    const repliedTo = proactiveInbox.find((item) => item.id === messages.at(-1)?.id && item.state !== 'replied');
+    const previewItem = proactivePreview;
+    if (previewItem) proactivePreview = null;
+    const repliedTo = proactiveInbox.find((item) => item.id === messages.at(-1)?.id && item.state !== 'replied') || previewItem;
     if (repliedTo && await runtime.connect()) {
       void runtime.request({type:'proactive.inbox.mark', id:crypto.randomUUID(), itemId:repliedTo.id, state:'replied'});
       // A user reply becomes the new context; don't let the old autonomous objective wake again.
@@ -1038,7 +1351,6 @@
         else await finishLocalAssistant(id, fallback, true);
         return;
       }
-      pushMessageEvent(id, 'status', '已连接运行时，生成中…', {status: 'running'});
       await runtime.chat(
         {
           type: 'chat.send',
@@ -1046,7 +1358,9 @@
           text: textValue,
           history,
           sessionId: activeConversationId || 'current',
-          slot: 'companion',
+          // Primary agent stays in chat; only spawn executor worker when sub-agents are enabled.
+          slot: allowSubAgents && decision.slot === 'executor' ? 'executor' : 'companion',
+          allowSubAgents,
           workspace,
           projectName,
           attachments: attachments.length ? attachments : undefined,
@@ -1055,40 +1369,74 @@
           onDelta: (delta) => {
             if (streamingId !== id) return;
             const target = messages.find((message) => message.id === id);
-            if (target) target.text += delta;
+            if (target) {
+              target.text += delta;
+              // Reassign so Svelte reliably re-renders streaming markdown body.
+              messages = messages;
+            }
             tick().then(scrollToBottom);
           },
           onEvent: (event) => {
+            // Allow late events (e.g. memory) only while this stream is still active.
             if (streamingId !== id) return;
             const kind = event.kind || 'status';
             const status =
-              kind === 'error' ? 'failed' : kind === 'memory' ? 'pending' : kind === 'workspace' ? 'done' : 'running';
-            pushMessageEvent(id, kind, event.text, {status, ts: event.ts || Date.now()});
+              event.status ||
+              (kind === 'error' ? 'failed' : kind === 'memory' || kind === 'workspace' || kind === 'status' ? 'done' : 'running');
+            pushMessageEvent(id, kind, event.text, {id: event.id, stepId: event.id, status, action: (event as any).action, receipt: (event as any).receipt, ts: event.ts || Date.now()});
           },
           onDone: () => {
-            if (streamingId !== id) return;
-            replying = false;
-            agentState = 'idle';
-            runtimeConnected = true;
-            streamingId = '';
-            attachedPaths = [];
+            // Even if the user already stopped (streamingId cleared), still finalize the bubble.
             const target = messages.find((message) => message.id === id);
-            if (target) target.streaming = false;
+            if (target) {
+              target.streaming = false;
+              messages = messages;
+            }
+            settleMessageEvents(id, 'done');
+            if (streamingId === id) {
+              replying = false;
+              agentState = 'idle';
+              runtimeConnected = true;
+              streamingId = '';
+              attachedPaths = [];
+            }
             void persistSession();
             setTimeout(() => void refreshMemories(), 1200);
           },
           onError: (error) => {
-            if (streamingId !== id) return;
             const target = messages.find((message) => message.id === id);
             const msg = formatRuntimeError(error, {isDemo, isTauri: true});
             if (target) {
-              target.error = msg;
+              if (streamingId === id || !target.text?.trim()) {
+                target.error = msg;
+              }
               target.streaming = false;
+              messages = messages;
             }
-            replying = false;
-            agentState = 'idle';
-            runtimeConnected = runtime.connected;
-            streamingId = '';
+            settleMessageEvents(id, 'failed');
+            if (streamingId === id) {
+              replying = false;
+              agentState = 'idle';
+              runtimeConnected = runtime.connected;
+              streamingId = '';
+              attachedPaths = [];
+            }
+            void persistSession();
+          },
+          onCancelled: () => {
+            const target = messages.find((message) => message.id === id);
+            if (target) {
+              target.streaming = false;
+              if (!target.text?.trim() && !target.error) target.text = '（已停止）';
+              messages = messages;
+            }
+            settleMessageEvents(id, 'skipped');
+            if (streamingId === id) {
+              replying = false;
+              agentState = 'idle';
+              streamingId = '';
+              attachedPaths = [];
+            }
             void persistSession();
           },
         },
@@ -1104,17 +1452,6 @@
       event.preventDefault();
       sendMessage();
     }
-  }
-
-  async function transferToExecution() {
-    const text = draft.trim();
-    if (!text) {
-      activeView = 'tasks';
-      notify('请在任务页补充任务内容');
-      return;
-    }
-    draft = '';
-    await createExecutorTask(text);
   }
 
   async function attachFile(event: Event) {
@@ -1154,7 +1491,8 @@
     }
   }
 
-  function goToView(id: ViewId) {
+  async function goToView(id: ViewId) {
+    if (replying && id !== activeView) await stopGeneration();
     activeView = id;
     if (id === 'project') {
       if (activeProjectId) void openProject(activeProjectId);
@@ -1179,10 +1517,10 @@
   {#if ready && redefiningPersona}<Oobe mode={personaEditorMode} initialPersona={personaEditorMode === 'redefine' ? persona : null} onComplete={savePersona} onCancel={() => (redefiningPersona = false)} />{/if}
   <main class="app-shell" inert={ready && !persona} aria-hidden={ready && !persona ? 'true' : undefined}>
     <header class="titlebar" data-tauri-drag-region>
-      <div class="brand">
+      <div class="brand" data-tauri-drag-region>
         <StatusDot active={agentState !== 'idle'} />
-        <strong>{persona?.name || 'Pattern'}</strong>
-        <span>{nav.find((n) => n.id === activeView)?.label}</span>
+        <strong data-tauri-drag-region>{persona?.name || 'Pattern'}</strong>
+        <span data-tauri-drag-region>{nav.find((n) => n.id === activeView)?.label}</span>
       </div>
       <div class="window-actions">
         <button aria-label="最小化" onclick={() => windowAction('minimize')}><Minus size={15} /></button>
@@ -1206,11 +1544,16 @@
           {proactiveInbox}
           {activeConversationId}
           {activeProjectId}
+          activeProactiveId={proactivePreview?.id || ''}
           onOpenConversation={openConversation}
           onOpenProject={openProject}
           onNewChat={() => newChat('global')}
           onNewProject={openNewProjectDialog}
           onOpenProactive={openProactiveInboxItem}
+          onDismissProactive={dismissProactiveInboxItem}
+          onDismissAllProactive={dismissAllProactiveInbox}
+          onDeleteConversation={deleteConversation}
+          onArchiveConversation={archiveConversation}
         />
       {/if}
       {#if activeView === 'chat'}
@@ -1218,10 +1561,19 @@
           <div class="conversation-head">
             <div class="conversation-head-copy">
               <p class="eyebrow">主 Agent · 全局</p>
-              <h1>{activeConversation?.title || homeGreeting}</h1>
-              {#if !activeConversation}<p class="conversation-context">{homeContext}</p>{/if}
+              <h1>{activeConversation?.title || (proactivePreview ? proactiveTitle(proactivePreview) : homeGreeting)}</h1>
+              {#if proactivePreview && !activeConversation}
+                <p class="conversation-context">主动消息预览 · 回复后才会创建对话 · 可忽略</p>
+              {:else if !activeConversation}
+                <p class="conversation-context">{homeContext}</p>
+              {/if}
             </div>
-            <button class="quiet-button" onclick={() => newChat('global')}><Plus size={14} />新对话</button>
+            <div class="conversation-head-actions">
+              {#if proactivePreview}
+                <button class="quiet-button" onclick={() => proactivePreview && dismissProactiveInboxItem(proactivePreview)}><Trash2 size={14} />忽略</button>
+              {/if}
+              <button class="quiet-button" onclick={() => newChat('global')}><Plus size={14} />新对话</button>
+            </div>
           </div>
           <div class="chat-stream" bind:this={stream}>
             <div class="day-divider"><span>{new Date().toLocaleDateString('zh-CN', {month: 'long', day: 'numeric', weekday: 'short'})}</span></div>
@@ -1236,27 +1588,27 @@
               <article class="message" class:user={message.role === 'user'} class:assistant={message.role === 'assistant'} class:proactive={!!message.proactive}>
                 {#if message.role === 'assistant'}
                   <div class="message-meta">
-                    <StatusDot size="small" />
+                    <StatusDot size="small" active={!!message.streaming} />
                     <strong>{persona?.name || 'Pattern'}</strong>
                     {#if message.proactive}<span class="badge amber">主动 · {message.proactive}</span>{/if}
-                    <time>{message.time}</time>
+                    {#if message.streaming && !message.text}
+                      <span>正在想</span>
+                    {:else}
+                      <time>{message.time}</time>
+                    {/if}
                   </div>
                 {/if}
                 <MessageContent {message} onOpenTask={openTaskReview} />
                 {#if message.role === 'user'}<time>{message.time}</time>{/if}
-                {#if message.error}<button type="button" class="text-action" onclick={() => retryAssistant(message.id)}>重试</button>{/if}
+                {#if !message.streaming}
+                  <div class="message-actions">
+                    <button type="button" onclick={() => copyMessage(message)}>复制</button>
+                    {#if message.role === 'user'}<button type="button" disabled={replying} onclick={() => editUserMessage(message)}>编辑</button>{/if}
+                    {#if message.role === 'assistant' && !message.proactive}<button type="button" disabled={replying} onclick={() => retryAssistant(message.id)}>{message.error ? '重试' : '重新生成'}</button>{/if}
+                  </div>
+                {/if}
               </article>
             {/each}
-            {#if replying}
-              <article class="message assistant">
-                <div class="message-meta">
-                  <StatusDot size="small" active={true} />
-                  <strong>{persona?.name || 'Pattern'}</strong>
-                  <span>正在想</span>
-                </div>
-                <div class="typing"><i></i><i></i><i></i></div>
-              </article>
-            {/if}
           </div>
           <form
             class="composer"
@@ -1265,12 +1617,24 @@
               sendMessage();
             }}
           >
+            {#if editingMessageId}
+              <div class="composer-editing"><span>正在编辑较早的消息，发送后将从这里继续。</span><button type="button" onclick={cancelMessageEdit}>取消</button></div>
+            {/if}
             <textarea aria-label="消息" bind:value={draft} onkeydown={keydown} rows="2" placeholder={`和 ${persona?.name || 'Pattern'} 说点什么……`}></textarea>
             <div class="composer-actions">
-              <button type="button" class="text-action" onclick={transferToExecution}>⇧ 交给子代理</button>
+              <button
+                type="button"
+                class="text-action subagent-toggle"
+                class:active={allowSubAgents}
+                aria-pressed={allowSubAgents}
+                title={allowSubAgents ? '子 Agent 已启用：复杂任务可派生子代理' : '子 Agent 已关闭：主 Agent 自己调用工具'}
+                onclick={() => setAllowSubAgents(!allowSubAgents)}
+              >
+                {allowSubAgents ? '子 Agent · 开' : '子 Agent · 关'}
+              </button>
               <input aria-label="添加文件" bind:this={attachmentInput} class="file-input" type="file" onchange={attachFile} />
               <button type="button" class="icon-action" title="添加文件（最大 64KB）" aria-label="添加文件" onclick={() => attachmentInput?.click()}><Paperclip size={14} /></button>
-              <span>主 Agent · 全局</span>
+              <span>{allowSubAgents ? '主 Agent · 可派生子代理' : '主 Agent · 直接工具'}</span>
               {#if replying}<button type="button" class="quiet-button" aria-label="停止生成" onclick={stopGeneration}>停止</button>{/if}
               <button class="send-button" aria-label="发送" disabled={!draft.trim() || replying}><ArrowUp size={18} /></button>
             </div>
@@ -1287,6 +1651,8 @@
             {replying}
             personaName={persona?.name || 'Pattern'}
             {activeSlot}
+            {allowSubAgents}
+            onToggleSubAgents={setAllowSubAgents}
             {fileNodes}
             {fileLoading}
             {fileError}
@@ -1298,8 +1664,11 @@
             onSend={sendMessage}
             onStop={stopGeneration}
             onRetry={retryAssistant}
+            onCopy={copyMessage}
+            onEdit={editUserMessage}
+            editingMessageId={editingMessageId}
+            onCancelEdit={cancelMessageEdit}
             onKeydown={keydown}
-            onTransfer={transferToExecution}
             onAttach={attachFile}
             onRefreshFiles={() => loadDirectoryTree(activeProject.path)}
             onOpenFile={openProjectFile}
@@ -1426,7 +1795,7 @@
             <code>{activeConversation?.scope || 'global'} · primary · {agentState}</code>
     </footer>
   </main>
-  {#if toast}<div class="toast show">{toast}</div>{/if}
+  {#if toast}<div class="toast show" role="status" aria-live="polite">{toast}</div>{/if}
   {#if editingMemory}<MemoryEditor initial={editingMemoryItem || undefined} onClose={() => { editingMemory = false; editingMemoryItem = null; }} onSave={async (item) => { if (editingMemoryItem) await updateMemory(editingMemoryItem.id, item); else await addMemory(item); editingMemoryItem = null; }} />{/if}
   {#if showProjectDialog}
     <div class="modal-backdrop" role="presentation">

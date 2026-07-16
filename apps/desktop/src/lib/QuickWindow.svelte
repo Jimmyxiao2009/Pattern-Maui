@@ -8,6 +8,7 @@
   let draft = $state('');
   let answer = $state('');
   let busy = $state(false);
+  let allowSubAgents = $state(typeof localStorage === 'undefined' ? true : localStorage.getItem('pattern-allow-sub-agents') !== '0');
   let slot = $state<'companion' | 'executor'>('companion');
   let input: HTMLTextAreaElement;
   let quickHistory = $state<Array<{role: 'user' | 'assistant'; content: string}>>([]);
@@ -70,6 +71,13 @@
     ];
     conversation.updatedAt = now;
     localStorage.setItem('pattern-conversations', JSON.stringify(conversations));
+    if ((window as any).__TAURI_INTERNALS__) {
+      let projects: unknown[] = [];
+      try { projects = JSON.parse(localStorage.getItem('pattern-projects') || '[]'); } catch { /* keep empty */ }
+      void import('@tauri-apps/api/core')
+        .then(({invoke}) => invoke('save_workspace_state', {conversations, projects}))
+        .catch(() => {});
+    }
     try { new BroadcastChannel('pattern-conversations').postMessage({type:'updated'}); } catch { /* optional same-device refresh signal */ }
   }
 
@@ -86,11 +94,7 @@
       title,
       detail: text,
     });
-    answer = `已交给子代理：${title}\n任务已创建。主对话只保留结果摘要，可打开主窗口任务页或审查窗查看。`;
-    if ((window as any).__TAURI_INTERNALS__) {
-      const {invoke} = await import('@tauri-apps/api/core');
-      await invoke('show_review');
-    }
+    answer = `好的，我来处理：${title}\n已开始桌面执行，进度会回到这里。`;
   }
 
   async function send() {
@@ -109,7 +113,7 @@
         }
         proactiveArrival = null;
       }
-      if (shouldTransferToExecutor(value)) {
+      if (allowSubAgents && shouldTransferToExecutor(value)) {
         await transfer(value);
         busy = false;
         return;
@@ -121,7 +125,7 @@
       }
       const id = crypto.randomUUID();
       await runtime.chat(
-        {type: 'chat.send', id, text: value, history: quickHistory, sessionId: quickConversationId || id, slot: 'companion'},
+        {type: 'chat.send', id, text: value, history: quickHistory, sessionId: quickConversationId || id, slot: allowSubAgents && decision.slot === 'executor' ? 'executor' : 'companion' as const, allowSubAgents},
         {
           onDelta: (delta) => (answer += delta),
           onDone: () => {
@@ -142,18 +146,6 @@
     }
   }
 
-  async function handoff() {
-    const value = draft.trim() || answer.trim();
-    if (!value || busy) return;
-    busy = true;
-    try {
-      await transfer(value);
-    } catch (error) {
-      answer = `转交失败：${error}`;
-    } finally {
-      busy = false;
-    }
-  }
 
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape') hide();
@@ -179,7 +171,7 @@
       {/each}
     </section>
   {:else}
-    <p class="quick-greeting">嗨，我在。想聊聊、记一件事，或者交给我执行？</p>
+    <p class="quick-greeting">嗨，我在。想聊聊、记一件事，或者直接让我动手。</p>
   {/if}
   {#if proactiveArrival}
     <section class="quick-proactive" aria-live="polite">
@@ -194,7 +186,7 @@
   {#if answer || busy}
     <section class="quick-answer">
       <div>
-        <span class="badge amber"><Zap size={11} />{slot === 'executor' ? '子代理' : '主 Agent'}</span>
+        <span class="badge amber"><Zap size={11} />{slot === 'executor' ? '执行中' : '主 Agent'}</span>
         {#if busy}<span class="thinking">正在想</span>{/if}
       </div>
       {#if answer}<p>{answer}</p>{:else}<p class="thinking">正在组织回答…</p>{/if}
@@ -202,7 +194,6 @@
   {/if}
   <footer>
     <button onclick={() => openMain()}><ExternalLink size={13} />打开主窗口</button>
-    <button onclick={handoff} disabled={busy || (!draft.trim() && !answer.trim())}>转交执行</button>
     <span>Enter 发送 · Esc 隐藏</span>
   </footer>
 </main>

@@ -72,6 +72,9 @@ export interface TaskItem {
   detail: string;
   status: 'scheduled' | 'queued' | 'running' | 'paused' | 'awaiting_approval' | 'cancelled' | 'done' | 'failed';
   createdAt: string;
+  conversationId?: string;
+  workspace?: string;
+  projectName?: string;
   riskTier?: number;
   error?: string;
   schedule?: {kind: 'daily' | 'weekly' | 'interval' | 'once'; time?: string; days?: number[]; intervalMinutes?: number; at?: number; enabled: boolean};
@@ -82,6 +85,12 @@ export interface TaskItem {
   runs?: Array<{id:string;startedAt:number;finishedAt?:number;status:'running'|'done'|'failed'|'cancelled';error?:string}>;
   workflow?: {id:string;name:string;stepCount:number;currentStep?:number;workspace?:string;agents?:number};
   agentResults?: Array<{skillId:string;output:string;status:'done'|'failed';ts:number}>;
+  recovery?: {
+    transactionId?: string;
+    state: 'unavailable' | 'active' | 'prepared' | 'committed' | 'rolled_back' | 'conflicted' | 'recovery_required';
+    fileScopes: string[];
+    error?: string;
+  };
   steps?: Array<{
     id: string;
     action: string;
@@ -153,9 +162,26 @@ export function importanceStars(value: number): 1 | 2 | 3 {
 }
 
 export function normalizeConversation(item: Partial<Conversation> & Pick<Conversation, 'id' | 'title' | 'createdAt' | 'updatedAt' | 'messages'>): Conversation {
+  const messages = (Array.isArray(item.messages) ? item.messages : []).map((message) => {
+    // Historical turns must not keep forever-spinning tool rows after reload.
+    if (!message?.events?.length || message.streaming) return {...message, streaming: false};
+    return {
+      ...message,
+      streaming: false,
+      events: message.events.map((event) => {
+        if (event.taskId && (event.status === 'running' || event.status === 'pending' || event.status === 'awaiting_approval')) {
+          return event;
+        }
+        if (event.status === 'running' || event.status === 'pending') {
+          return {...event, status: 'done'};
+        }
+        return event;
+      }),
+    };
+  });
   return {
     ...item,
-    messages: Array.isArray(item.messages) ? item.messages : [],
+    messages,
     archived: !!item.archived,
     scope: item.scope === 'project' && item.projectId ? 'project' : 'global',
     projectId: item.scope === 'project' ? item.projectId : undefined,

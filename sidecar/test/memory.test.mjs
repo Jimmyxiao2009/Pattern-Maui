@@ -1,31 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {buildSync} from 'esbuild';
 
-function loadMemory(dir) {
+function loadMemory() {
   const entry = fileURLToPath(new URL('../../packages/memory/src/index.ts', import.meta.url));
-  const outfile = join(dir, 'mem.cjs');
+  // Keep the bundle under sidecar/ so Node can walk up to node_modules/better-sqlite3.
+  const cacheDir = fileURLToPath(new URL('../.tmp', import.meta.url));
+  mkdirSync(cacheDir, {recursive: true});
+  const outfile = join(cacheDir, 'mem.cjs');
   buildSync({
     entryPoints: [entry],
     bundle: true,
     platform: 'node',
     format: 'cjs',
     target: 'node22',
+    external: ['better-sqlite3'],
     outfile,
   });
-  const require = createRequire(import.meta.url);
+  const require = createRequire(outfile);
   return require(outfile);
 }
 
-test('memory engine add/search/expire via node sqlite', async () => {
+test('memory engine add/search/expire via better-sqlite3', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pattern-memory-'));
   try {
-    const {MemoryEngine} = loadMemory(dir);
+    const {MemoryEngine} = loadMemory();
     const engine = new MemoryEngine(dir);
     const item = await engine.add({text: '用户养了一只黄眼睛的黑猫', category: 'fact', importance: 0.8});
     assert.equal(item.expired, false);
@@ -46,7 +50,7 @@ test('memory engine add/search/expire via node sqlite', async () => {
 test('FTS path finds Chinese substring among distractors', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pattern-memory-fts-'));
   try {
-    const {MemoryEngine, buildFtsMatchQuery, ftsIndexText} = loadMemory(dir);
+    const {MemoryEngine, buildFtsMatchQuery, ftsIndexText} = loadMemory();
     assert.ok(buildFtsMatchQuery('黑猫').includes('黑猫') || buildFtsMatchQuery('黑猫').includes('黑'));
     assert.ok(ftsIndexText('黄眼睛的黑猫').includes('黑猫'));
 

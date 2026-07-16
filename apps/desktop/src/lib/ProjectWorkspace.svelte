@@ -14,6 +14,8 @@
     replying,
     personaName,
     activeSlot,
+    allowSubAgents = true,
+    onToggleSubAgents,
     fileNodes,
     fileLoading,
     fileError,
@@ -26,8 +28,11 @@
     onSend,
     onStop,
     onRetry,
+    onCopy,
+    onEdit,
+    editingMessageId = '',
+    onCancelEdit,
     onKeydown,
-    onTransfer,
     onAttach,
     onRefreshFiles,
     onOpenFile,
@@ -45,6 +50,8 @@
     replying: boolean;
     personaName: string;
     activeSlot: 'companion' | 'executor';
+    allowSubAgents?: boolean;
+    onToggleSubAgents?: (value: boolean) => void;
     fileNodes: FileNode[];
     fileLoading: boolean;
     fileError: string;
@@ -57,8 +64,11 @@
     onSend: () => void;
     onStop: () => void;
     onRetry: (messageId: string) => void;
+    onCopy: (message: ChatMessage) => void | Promise<void>;
+    onEdit: (message: ChatMessage) => void;
+    editingMessageId?: string;
+    onCancelEdit: () => void;
     onKeydown: (event: KeyboardEvent) => void;
-    onTransfer: () => void;
     onAttach: (event: Event) => void;
     onRefreshFiles: () => void;
     onOpenFile: (node: FileNode) => void;
@@ -142,29 +152,27 @@
         <article class="message" class:user={message.role === 'user'} class:assistant={message.role === 'assistant'} class:proactive={!!message.proactive}>
           {#if message.role === 'assistant'}
             <div class="message-meta">
-              <StatusDot size="small" />
+              <StatusDot size="small" active={!!message.streaming} />
               <strong>{personaName}</strong>
               {#if message.proactive}<span class="badge amber">主动 · {message.proactive}</span>{/if}
-              <time>{message.time}</time>
+              {#if message.streaming && !message.text}
+                <span>正在想</span>
+              {:else}
+                <time>{message.time}</time>
+              {/if}
             </div>
           {/if}
           <MessageContent {message} onOpenTask={(id) => onOpenTask?.(id)} />
           {#if message.role === 'user'}<time>{message.time}</time>{/if}
-          {#if message.error}
-            <button type="button" class="text-action" onclick={() => onRetry(message.id)}>重试</button>
+          {#if !message.streaming}
+            <div class="message-actions">
+              <button type="button" onclick={() => onCopy(message)}>复制</button>
+              {#if message.role === 'user'}<button type="button" disabled={replying} onclick={() => onEdit(message)}>编辑</button>{/if}
+              {#if message.role === 'assistant' && !message.proactive}<button type="button" disabled={replying} onclick={() => onRetry(message.id)}>{message.error ? '重试' : '重新生成'}</button>{/if}
+            </div>
           {/if}
         </article>
       {/each}
-      {#if replying}
-        <article class="message assistant">
-          <div class="message-meta">
-            <StatusDot size="small" active={true} />
-            <strong>{personaName}</strong>
-            <span>正在想</span>
-          </div>
-          <div class="typing"><i></i><i></i><i></i></div>
-        </article>
-      {/if}
     </div>
     <form
       class="composer"
@@ -173,12 +181,24 @@
         onSend();
       }}
     >
+      {#if editingMessageId}
+        <div class="composer-editing"><span>正在编辑较早的消息，发送后将从这里继续。</span><button type="button" onclick={onCancelEdit}>取消</button></div>
+      {/if}
       <textarea aria-label="项目消息" bind:value={draft} onkeydown={onKeydown} rows="2" placeholder={`在 ${project.name} 中和 ${personaName} 讨论……`}></textarea>
       <div class="composer-actions">
-        <button type="button" class="text-action" onclick={onTransfer}>⇧ 转交执行</button>
+        <button
+          type="button"
+          class="text-action subagent-toggle"
+          class:active={allowSubAgents}
+          aria-pressed={allowSubAgents}
+          title={allowSubAgents ? '子 Agent 已启用：复杂任务可派生子代理' : '子 Agent 已关闭：主 Agent 自己调用工具'}
+          onclick={() => onToggleSubAgents?.(!allowSubAgents)}
+        >
+          {allowSubAgents ? '子 Agent · 开' : '子 Agent · 关'}
+        </button>
         <input aria-label="添加文件" bind:this={attachmentInput} class="file-input" type="file" onchange={onAttach} />
         <button type="button" class="icon-action" title="添加文件（最大 64KB）" aria-label="添加文件" onclick={() => attachmentInput?.click()}><Paperclip size={14} /></button>
-        <span>项目上下文已注入</span>
+        <span>{allowSubAgents ? '项目 · 可派生子代理' : '项目 · 直接工具'}</span>
         {#if replying}
           <button type="button" class="quiet-button" aria-label="停止生成" onclick={onStop}><Square size={14} />停止</button>
         {/if}

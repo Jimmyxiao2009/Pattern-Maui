@@ -651,17 +651,38 @@ fn start_runtime(state: &RuntimeState) -> Result<(), String> {
         command.arg(script);
         command
     };
+    // GUI apps on Windows often inherit a broken/closed console pipe. Inherit stderr
+    // then surfaces ERROR_NO_DATA (0x800700e8) when the child writes. Pipe all stdio
+    // and hide the console window so node/sidecar can start cleanly.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("无法启动 sidecar：{error}"))?;
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                eprintln!("[pattern-sidecar] {line}");
+            }
+        });
+    }
     let stdout = child.stdout.take().ok_or("无法读取 sidecar stdout")?;
     let mut line = String::new();
     BufReader::new(stdout)
         .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("读取 sidecar 握手失败：{error}"))?;
+    if line.trim().is_empty() {
+        let _ = child.kill();
+        return Err("sidecar 未输出握手信息（可能启动失败）".into());
+    }
     let connection: RuntimeConnection =
         serde_json::from_str(line.trim()).map_err(|error| format!("sidecar 握手失败：{error}"))?;
     *state
@@ -1160,14 +1181,17 @@ fn show_main(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn show_review(app: AppHandle, task_id: Option<String>) -> Result<(), String> {
-    let url = if let Some(id) = task_id.filter(|value| !value.is_empty()) {
+    let focus_task_id = task_id.filter(|value| !value.is_empty());
+    let url = if let Some(id) = focus_task_id.as_ref() {
         format!("index.html?window=review&taskId={id}")
     } else {
         "index.html?window=review".into()
     };
     if let Some(window) = app.get_webview_window("review") {
-        // Recreate URL is hard on existing webview; still show and focus. Frontend also listens to task updates.
-        let _ = window.eval(&format!("window.__patternFocusTaskId = {};", serde_json::to_string(&url).unwrap_or_else(|_| "null".into())));
+        if let Some(id) = focus_task_id.as_ref() {
+            let detail = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());
+            let _ = window.eval(&format!("window.dispatchEvent(new CustomEvent('pattern-focus-task', {{ detail: {detail} }}));"));
+        }
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
@@ -1191,6 +1215,31 @@ fn toggle_quick(app: &AppHandle) {
             let _ = window.set_focus();
         }
     }
+}
+
+#[tauri::command]
+fn save_workspace_state(conversations: serde_json::Value, projects: serde_json::Value) -> Result<(), String> {
+    let file = ensure_pattern_dir()?.join("workspace.json");
+    let value = serde_json::json!({
+        "version": 1,
+        "conversations": conversations,
+        "projects": projects,
+        "updatedAt": chrono::Utc::now().timestamp_millis(),
+    });
+    fs::write(file, serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_workspace_state() -> Result<Option<serde_json::Value>, String> {
+    let file = ensure_pattern_dir()?.join("workspace.json");
+    if !file.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(file).map_err(|error| error.to_string())?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1415,6 +1464,8 @@ pub fn run() {
             pick_directory,
             save_session,
             load_session,
+            save_workspace_state,
+            load_workspace_state,
             save_tasks,
             load_tasks,
             save_channel_config,

@@ -36,7 +36,7 @@
         </button>
         <div class="conversation-actions">
           <button title={conversation.archived ? '恢复' : '归档'} aria-label={conversation.archived ? '恢复' : '归档'} onclick={() => onArchive(conversation.id)}><Archive size={14}/></button>
-          <button title="删除" aria-label="删除" disabled={conversations.length <= 1} onclick={() => onDelete(conversation.id)}><Trash2 size={14}/></button>
+          <button title="删除" aria-label="删除" onclick={() => onDelete(conversation.id)}><Trash2 size={14}/></button>
         </div>
       </article>
     {:else}

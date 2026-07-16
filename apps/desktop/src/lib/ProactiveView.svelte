@@ -173,8 +173,8 @@
   {:else}
     <div class="proactive-settings-grid">
       <section class="proactive-settings-card"><div class="card-heading"><div><h2>主动引擎</h2><p>控制 AI 自主唤醒和系统提醒是否运行。</p></div><Sparkles size={20}/></div>
-        <SettingRow title="启用主动性" desc="关闭后不会产生新的 AI 主动消息或定时提醒"><Toggle checked={proactiveEnabled} onChange={(value) => proactiveEnabled = value}/></SettingRow>
-        <SettingRow title="暂停主动消息" desc="保留配置，但暂时不发送新的主动消息"><Toggle checked={paused} onChange={(value) => paused = value}/></SettingRow>
+        <SettingRow title="启用 AI 主动消息" desc="关闭后不会产生新的 AI 自主消息；你明确设置的定时提醒仍会送达"><Toggle checked={proactiveEnabled} label="启用 AI 主动消息" onChange={(value) => proactiveEnabled = value}/></SettingRow>
+        <SettingRow title="暂停 AI 主动消息" desc="保留配置，但暂时不发送新的 AI 主动消息"><Toggle checked={paused} label="暂停 AI 主动消息" onChange={(value) => paused = value}/></SettingRow>
         <SettingRow title="安静时间" desc="这个时间点之后，AI 主动提醒会更克制"><select class="compact-select" bind:value={bedtimeHour}>{#each [21,22,23,0,1,2] as hour}<option value={hour}>{String(hour).padStart(2, '0')}:00</option>{/each}</select></SettingRow>
         <div class="proactive-settings-actions"><button class="primary-button" onclick={saveSettings}><Save size={14}/>保存设置</button><button class="quiet-button" onclick={runNow}><Sparkles size={14}/>现在唤醒一次</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
       </section>

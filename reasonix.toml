@@ -1,2 +1,7 @@
 [permissions]
 allow = ["Edit"]
+
+
+[agent]
+plan_mode_read_only_commands = ["python -c"]
+

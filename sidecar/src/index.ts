@@ -39,6 +39,7 @@ interface ChatRequest {
   history: Array<{role: 'user' | 'assistant'; content: string}>;
   sessionId?: string;
   slot?: AgentSlot;
+  allowSubAgents?: boolean;
   workspace?: string;
   projectName?: string;
   attachments?: string[];
@@ -58,6 +59,10 @@ const proactive = new ProactiveEngine(dataDir);
 let relay = new RelayClient(dataDir, null);
 let lastUserActivityAt = Math.floor(Date.now() / 1000);
 let tasks: TaskRecord[] = loadTasks();
+const queuedComputerUseTaskIds = new Set<string>();
+let computerUseQueue: Promise<void> = Promise.resolve();
+let recoveryReconciled = false;
+let recoveryReconciliationInFlight: Promise<void> | null = null;
 let modelMetrics = loadModelMetrics();
 function skillsFile() {
   return join(dataDir, 'skills.json');
@@ -109,6 +114,674 @@ const codingWorkflows: WorkflowDefinition[] = [
 ];
 const execFileAsync = promisify(execFile);
 let mcpServers = loadMcpServers();
+
+/** Built-in desktop tools + enabled MCP tools. Catalog must match what runCompanionToolLoop can execute. */
+type CompanionTool = {
+  serverId: string;
+  serverName: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  kind: 'desktop' | 'mcp';
+};
+
+const DESKTOP_SERVER_ID = 'desktop';
+
+function listDesktopTools(): CompanionTool[] {
+  if (!bridgeReady()) return [];
+  return [
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'launch',
+      description: 'Launch a common local app. Prefer known ids: notepad, calc, calculator, explorer, cmd, powershell, browser, settings, paint, snippingtool. Or pass a shell target in {command}.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          app: {type: 'string', description: 'Known app id (notepad, calc, explorer, ...)'},
+          command: {type: 'string', description: 'Fallback shell command / executable path'},
+        },
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'key',
+      description: 'Press a key or chord. Use key=win for Start menu. Optional modifiers: ctrl, alt, shift, win.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          key: {type: 'string'},
+          modifiers: {type: 'array', items: {type: 'string'}},
+        },
+        required: ['key'],
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'type',
+      description: 'Type text into the focused window.',
+      inputSchema: {type: 'object', properties: {text: {type: 'string'}}, required: ['text']},
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'click',
+      description: 'Click at absolute screen coordinates. Optional button: left|right|middle.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          x: {type: 'number'},
+          y: {type: 'number'},
+          button: {type: 'string'},
+        },
+        required: ['x', 'y'],
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'scroll',
+      description: 'Scroll. amount is signed; axis optional: vertical|horizontal.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          amount: {type: 'number'},
+          axis: {type: 'string'},
+        },
+        required: ['amount'],
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'foreground',
+      description: 'Read the current foreground window title.',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'focus',
+      description: 'Try to bring a window to the foreground by title hints (e.g. Calculator/计算器). Useful after launch when Pattern still owns focus.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: {type: 'string'},
+          hints: {type: 'array', items: {type: 'string'}},
+          app: {type: 'string'},
+        },
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'accessibility_tree',
+      description: 'Read accessibility / UIA controls of the foreground window.',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'accessibility_action',
+      description: 'Invoke or setValue on an accessibility control. action: invoke|setValue. Prefer ref/automationId/name from accessibility_tree.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {type: 'string'},
+          ref: {type: 'string'},
+          automationId: {type: 'string'},
+          name: {type: 'string'},
+          value: {type: 'string'},
+        },
+        required: ['action'],
+      },
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'screenshot',
+      description: 'Capture a screenshot. Returns path metadata only (not full image bytes) for receipts.',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'desktop',
+    },
+    {
+      serverId: DESKTOP_SERVER_ID,
+      serverName: 'OS Bridge',
+      name: 'computer_use',
+      description: 'Enter computer-use mode: enqueue a multi-step desktop session with per-step screenshot + UIA tree + controller actions. Use for multi-step UI goals (e.g. open Calculator and compute 1+1). Prefer atomic launch/key for single short actions. arguments.goal required.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          goal: {type: 'string', description: 'What to accomplish on the desktop'},
+          app: {type: 'string', description: 'Optional app hint (calc, notepad, ...)'},
+          title: {type: 'string', description: 'Optional task title'},
+        },
+        required: ['goal'],
+      },
+      kind: 'desktop',
+    },
+  ];
+}
+
+function listMcpCompanionTools(): CompanionTool[] {
+  return mcpServers
+    .filter((server) => server.enabled && (server.tools?.length || server.toolSchemas?.length))
+    .flatMap((server) => {
+      if (server.toolSchemas?.length) {
+        return server.toolSchemas.map((tool) => ({
+          serverId: server.id,
+          serverName: server.name,
+          name: tool.name,
+          description: tool.description || `${server.name}/${tool.name}`,
+          inputSchema: tool.inputSchema || {type: 'object', properties: {}},
+          kind: 'mcp' as const,
+        }));
+      }
+      return (server.tools || []).map((name) => ({
+        serverId: server.id,
+        serverName: server.name,
+        name,
+        description: `${server.name}/${name}`,
+        inputSchema: {type: 'object', properties: {}},
+        kind: 'mcp' as const,
+      }));
+    });
+}
+
+function listCompanionTools(): CompanionTool[] {
+  return [...listDesktopTools(), ...listMcpCompanionTools()];
+}
+
+function companionToolCatalogText(tools: CompanionTool[]) {
+  if (!tools.length) {
+    return [
+      '当前没有可用工具。',
+      bridgeReady()
+        ? '- OS Bridge 已连接，但桌面工具未列出（异常）；请重试。'
+        : '- OS Bridge 未连接：桌面键鼠/无障碍/截屏不可用。请在桌面端启动 Pattern 并确认 Bridge。',
+      '- 已启用的 MCP 工具：无。可在「工具」页添加并启用 MCP。',
+      '在工具可用之前，禁止假装已经打开应用、按键或调用 MCP。',
+    ].join('\n');
+  }
+  const desktop = tools.filter((t) => t.kind === 'desktop');
+  const mcp = tools.filter((t) => t.kind === 'mcp');
+  const lines: string[] = [];
+  if (desktop.length) {
+    lines.push('Desktop tools (use serverId=\"desktop\" and tool short name only):');
+    for (const tool of desktop) {
+      lines.push(`- serverId=desktop tool=${tool.name} — ${tool.description} schema=${JSON.stringify(tool.inputSchema).slice(0, 400)}`);
+    }
+  } else {
+    lines.push('Desktop tools: unavailable (OS Bridge offline).');
+  }
+  if (mcp.length) {
+    lines.push('MCP tools (use serverId + tool short name):');
+    for (const tool of mcp) {
+      lines.push(`- serverId=${tool.serverId} tool=${tool.name} — ${tool.description} schema=${JSON.stringify(tool.inputSchema).slice(0, 400)}`);
+    }
+  } else {
+    lines.push('MCP tools: none enabled.');
+  }
+  return lines.join('\n');
+}
+
+function extractCompanionToolPlan(raw: string): {toolCalls: Array<{serverId?: string; tool: string; arguments?: Record<string, unknown>}>; final?: string} | null {
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!Array.isArray((parsed as any).toolCalls) || !(parsed as any).toolCalls.length) return null;
+    return parsed as any;
+  } catch {
+    return null;
+  }
+}
+
+/** Models often copy catalog labels like desktop:launch / desktop.launch into the tool field. */
+function normalizeCompanionToolName(tool: string): string {
+  return String(tool || '')
+    .trim()
+    .replace(/^desktop[.:]/i, '')
+    .replace(/^os\s*bridge[.:]/i, '')
+    .trim();
+}
+
+function resolveCompanionServerId(
+  call: {serverId?: string; tool?: string},
+  toolName: string,
+  tools: CompanionTool[],
+): string {
+  const rawTool = String(call.tool || '');
+  if (call.serverId) return String(call.serverId);
+  if (/^desktop[.:]/i.test(rawTool)) return DESKTOP_SERVER_ID;
+  const hit = tools.find((t) => t.name === toolName);
+  return hit?.serverId || '';
+}
+
+const DESKTOP_APP_COMMANDS: Record<string, string> = {
+  notepad: 'notepad',
+  calc: 'calc',
+  calculator: 'calc',
+  explorer: 'explorer',
+  cmd: 'cmd',
+  powershell: 'powershell',
+  terminal: 'wt',
+  browser: 'start https://',
+  edge: 'msedge',
+  chrome: 'chrome',
+  settings: 'ms-settings:',
+  paint: 'mspaint',
+  snippingtool: 'snippingtool',
+  snip: 'snippingtool',
+};
+
+function sleepMs(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const DESKTOP_FOCUS_HINTS: Record<string, string[]> = {
+  notepad: ['Notepad', '无事本'],
+  calc: ['Calculator', '计算器'],
+  calculator: ['Calculator', '计算器'],
+  explorer: ['File Explorer', '文件资源管理器'],
+  cmd: ['Command Prompt', 'cmd.exe', '命令提示符'],
+  powershell: ['PowerShell', 'Windows PowerShell'],
+  terminal: ['Terminal', 'Windows Terminal'],
+  edge: ['Microsoft Edge', 'Edge'],
+  chrome: ['Google Chrome', 'Chrome'],
+  settings: ['Settings', '设置'],
+  paint: ['Paint', '画图'],
+  snippingtool: ['Snipping Tool', '截图工具'],
+  snip: ['Snipping Tool', '截图工具'],
+  browser: ['Edge', 'Chrome', 'Firefox', '浏览器'],
+};
+
+async function focusWindowByHints(hints: string[]): Promise<{ok: boolean; method?: string; matched?: string; error?: string}> {
+  const cleaned = hints.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8);
+  if (!cleaned.length) return {ok: false, error: 'no focus hints'};
+  try {
+    if (process.platform === 'win32') {
+      // WScript.Shell AppActivate is the lightest reliable focus helper without a new Bridge endpoint.
+      const list = cleaned.map((h) => `'${h.replace(/'/g, "''")}'`).join(',');
+      const ps = [
+        `$w = New-Object -ComObject WScript.Shell`,
+        `$hints = @(${list})`,
+        `$ok = $false`,
+        `$matched = ''`,
+        `foreach ($h in $hints) { if ($w.AppActivate($h)) { $ok = $true; $matched = $h; break } }`,
+        `if ($ok) { Write-Output ("MATCH:" + $matched) } else { Write-Output "MISS" }`,
+      ].join('; ');
+      const {stdout} = await execFileAsync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], {
+        windowsHide: true,
+        timeout: 5000,
+      });
+      const line = String(stdout || '').trim();
+      if (line.startsWith('MATCH:')) return {ok: true, method: 'AppActivate', matched: line.slice(6)};
+      return {ok: false, method: 'AppActivate', error: 'no matching window title'};
+    }
+    if (process.platform === 'darwin') {
+      const appName = cleaned[0];
+      await execFileAsync('osascript', ['-e', `tell application "${appName.replace(/"/g, '\\"')}" to activate`], {timeout: 5000});
+      return {ok: true, method: 'osascript', matched: appName};
+    }
+    return {ok: false, error: 'focus not implemented on this platform'};
+  } catch (error) {
+    return {ok: false, error: error instanceof Error ? error.message : String(error)};
+  }
+}
+
+function summarizeAccessibilityTree(tree: any, limit = 40) {
+  const controls = Array.isArray(tree?.controls) ? tree.controls : [];
+  const useful = controls
+    .filter((item: any) => item && (item.name || item.automationId || item.controlType))
+    .slice(0, limit)
+    .map((item: any) => ({
+      ref: item.ref,
+      name: item.name,
+      automationId: item.automationId,
+      controlType: item.controlType,
+      enabled: item.enabled,
+    }));
+  return {
+    supported: tree?.supported !== false,
+    total: controls.length,
+    shown: useful.length,
+    controls: useful,
+    note: controls.length > useful.length ? `truncated ${useful.length}/${controls.length} controls for model context` : undefined,
+  };
+}
+
+async function readDesktopUiContext(options: {focusHints?: string[]; waitMs?: number} = {}) {
+  if (options.waitMs) await sleepMs(options.waitMs);
+  let focus: Awaited<ReturnType<typeof focusWindowByHints>> | undefined;
+  if (options.focusHints?.length) {
+    focus = await focusWindowByHints(options.focusHints);
+    await sleepMs(250);
+  }
+  const foreground = bridgeReady() ? await bridgeCall('/foreground', undefined, true) : null;
+  let accessibility: any = null;
+  let treeSummary: any = null;
+  if (bridgeReady()) {
+    try {
+      accessibility = await bridgeCall('/accessibility/tree', undefined, true);
+      treeSummary = summarizeAccessibilityTree(accessibility);
+    } catch (error) {
+      treeSummary = {supported: false, error: error instanceof Error ? error.message : String(error)};
+    }
+  }
+  const title = String(foreground?.title || '');
+  return {
+    focus,
+    foreground: foreground || {title: ''},
+    accessibility: treeSummary,
+    warning:
+      title && /pattern/i.test(title)
+        ? 'Foreground is still Pattern. Do not claim you operated the target app UI until focus/tree shows the target.'
+        : undefined,
+  };
+}
+
+async function launchDesktopApp(args: Record<string, unknown>): Promise<unknown> {
+  const app = String(args.app || args.name || '').trim().toLowerCase();
+  const command = String(args.command || args.cmd || '').trim();
+  let target = command || (app ? DESKTOP_APP_COMMANDS[app] : '');
+  if (!target && app) {
+    // Unknown id: try as executable / shell open name
+    target = app;
+  }
+  if (!target) throw new Error('launch requires app or command');
+  if (process.platform === 'win32') {
+    if (target.startsWith('ms-settings:') || target.startsWith('http')) {
+      await execFileAsync('cmd', ['/c', 'start', '', target], {windowsHide: true});
+    } else if (target === 'start https://') {
+      await execFileAsync('cmd', ['/c', 'start', '', 'https://www.bing.com'], {windowsHide: true});
+    } else {
+      // `start` allows shell apps like notepad/calc without waiting
+      await execFileAsync('cmd', ['/c', 'start', '', target], {windowsHide: true});
+    }
+  } else if (process.platform === 'darwin') {
+    await execFileAsync('open', [target.startsWith('/') ? target : `-a`, target].filter(Boolean) as string[]);
+  } else {
+    await execFileAsync('xdg-open', [target]);
+  }
+
+  // After launch: wait, try focus, then attach foreground title + UIA control summary for the model.
+  const focusHints = [
+    ...(app && DESKTOP_FOCUS_HINTS[app] ? DESKTOP_FOCUS_HINTS[app] : []),
+    app,
+    target,
+  ].filter(Boolean) as string[];
+  const ui = await readDesktopUiContext({focusHints, waitMs: 900});
+  return {
+    ok: true,
+    launched: target,
+    app: app || undefined,
+    ...ui,
+  };
+}
+
+async function executeDesktopTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  const name = normalizeCompanionToolName(toolName);
+  switch (name) {
+    case 'launch':
+      return await launchDesktopApp(args);
+    case 'key':
+      return await bridgeCall('/input', {
+        type: 'key',
+        key: String(args.key || ''),
+        modifiers: Array.isArray(args.modifiers) ? args.modifiers : undefined,
+      });
+    case 'type':
+      return await bridgeCall('/input', {type: 'type', text: String(args.text || '')});
+    case 'click':
+      return await bridgeCall('/input', {
+        type: 'click',
+        x: Number(args.x),
+        y: Number(args.y),
+        button: String(args.button || 'left'),
+      });
+    case 'scroll':
+      return await bridgeCall('/input', {
+        type: 'scroll',
+        amount: Number(args.amount || 0),
+        axis: args.axis ? String(args.axis) : undefined,
+      });
+    case 'foreground':
+      return await bridgeCall('/foreground', undefined, true);
+    case 'focus': {
+      const hints = [
+        ...(Array.isArray(args.hints) ? args.hints.map((item) => String(item)) : []),
+        args.title ? String(args.title) : '',
+        args.app ? String(args.app) : '',
+        ...(args.app && DESKTOP_FOCUS_HINTS[String(args.app).toLowerCase()]
+          ? DESKTOP_FOCUS_HINTS[String(args.app).toLowerCase()]
+          : []),
+      ].filter(Boolean);
+      const focus = await focusWindowByHints(hints);
+      await sleepMs(200);
+      const foreground = bridgeReady() ? await bridgeCall('/foreground', undefined, true) : null;
+      return {ok: !!focus.ok, focus, foreground};
+    }
+    case 'accessibility_tree': {
+      const tree = await bridgeCall('/accessibility/tree', undefined, true);
+      return summarizeAccessibilityTree(tree);
+    }
+    case 'accessibility_action':
+      return await bridgeCall('/accessibility/action', {
+        action: String(args.action || 'invoke'),
+        ref: args.ref ? String(args.ref) : undefined,
+        automationId: args.automationId ? String(args.automationId) : undefined,
+        name: args.name ? String(args.name) : undefined,
+        value: args.value != null ? String(args.value) : args.text != null ? String(args.text) : '',
+      });
+    case 'screenshot': {
+      const shot = await bridgeCall('/screenshot', {});
+      // Do not dump huge base64 into model context
+      return {
+        ok: true,
+        path: shot?.path,
+        hasImage: !!shot?.pngBase64,
+        bytes: typeof shot?.pngBase64 === 'string' ? Math.floor((shot.pngBase64.length * 3) / 4) : 0,
+      };
+    }
+    case 'computer_use': {
+      const goal = String(args.goal || args.task || args.detail || '').trim();
+      if (!goal) throw new Error('computer_use requires goal');
+      const title = String(args.title || goal).trim().slice(0, 80);
+      const app = String(args.app || '').trim();
+      const detail = app ? `${goal}\n(app hint: ${app})` : goal;
+      const task = await createTaskFromText(title, detail, undefined, undefined, undefined, {
+        conversationId: typeof args.conversationId === 'string' ? args.conversationId : undefined,
+        workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
+        projectName: typeof args.projectName === 'string' ? args.projectName : undefined,
+      });
+      return {
+        ok: true,
+        mode: 'computer_use',
+        taskId: task.id,
+        status: task.status,
+        title: task.title,
+        message: '已进入 computer-use 模式并排队执行；进度会通过任务事件同步到对话。',
+      };
+    }
+    default:
+      throw new Error(`未知桌面工具: ${toolName}`);
+  }
+}
+
+async function completeChatOnce(
+  message: ChatRequest,
+  system: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!config) throw new Error('runtime is not configured');
+  const anthropic = config.provider.toLowerCase().includes('anthropic');
+  const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
+  const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions'), anthropic
+    ? {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': config.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          max_tokens: 4096,
+          stream: false,
+          system,
+          messages: [...message.history, {role: 'user', content: message.text}],
+        }),
+        signal: requestSignal,
+      }
+    : {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          stream: false,
+          messages: [{role: 'system', content: system}, ...message.history, {role: 'user', content: message.text}],
+        }),
+        signal: requestSignal,
+      });
+  if (!response.ok) throw new Error(`model API status ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  const json: any = await response.json();
+  recordUsage(config.provider, config.model, json.usage);
+  return String(anthropic ? json.content?.map((item: any) => item.text).join('') : json.choices?.[0]?.message?.content || '');
+}
+
+async function runCompanionToolLoop(
+  socket: WebSocket,
+  message: ChatRequest,
+  baseSystem: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const tools = listCompanionTools();
+  const allowSubAgents = message.allowSubAgents !== false;
+  const hasDesktop = tools.some((t) => t.kind === 'desktop');
+  const hasMcp = tools.some((t) => t.kind === 'mcp');
+  const system = `${baseSystem}
+[Primary-agent tools]
+- You are the primary agent. Call tools yourself when action is required.
+- Sub-agents are ${allowSubAgents ? 'ENABLED: executor handoff may also auto-route heavy desktop goals' : 'DISABLED: no auto executor handoff; use desktop tools including computer_use yourself'}.
+- OS Bridge desktop tools: ${hasDesktop ? 'AVAILABLE' : 'UNAVAILABLE'}. MCP tools: ${hasMcp ? 'AVAILABLE' : 'NONE ENABLED'}.
+- Tool catalog (authoritative for this turn — only call tools listed here):
+${companionToolCatalogText(tools)}
+[How to call tools — mandatory]
+- Tools needed → JSON ONLY, no markdown fences:
+  {"toolCalls":[{"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}],"final":""}
+- serverId="desktop" for OS tools; tool is SHORT NAME only (launch|key|type|click|scroll|foreground|focus|accessibility_tree|accessibility_action|screenshot|computer_use).
+- NEVER use tool="desktop:launch" or "desktop.launch".
+[Desktop recipes]
+1) Open app: {"serverId":"desktop","tool":"launch","arguments":{"app":"calc"|"notepad"|...}} — receipt includes UIA summary + foreground.
+2) Focus: {"serverId":"desktop","tool":"focus","arguments":{"hints":["Calculator","计算器"]}}
+3) Tree: {"serverId":"desktop","tool":"accessibility_tree","arguments":{}}
+4) Control: {"serverId":"desktop","tool":"accessibility_action","arguments":{"action":"invoke","name":"..."}}
+5) Key/type: key / type tools as needed.
+6) Multi-step computer-use mode: {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}} — enters the queued vision+UIA session. Prefer this for multi-step UI work.
+[Policy]
+- No tools needed → answer in natural language.
+- Empty catalog / Bridge offline → say how to enable; no role-play.
+- Only assert facts from tool receipts. If foreground is still Pattern, do not claim you operated another app.
+- computer_use starts the full session; atomic tools are for short ops.`;
+
+  setAgentState('thinking');
+  send(socket, {type: 'chat.started', id: message.id, slot: 'companion'});
+  send(socket, {
+    type: 'chat.event',
+    id: message.id,
+    event: {
+      id: `tools:${message.id}:catalog`,
+      kind: 'tool',
+      action: 'catalog',
+      text: `工具面 · desktop ${hasDesktop ? 'on' : 'off'} · mcp ${hasMcp ? tools.filter((t) => t.kind === 'mcp').length : 0}`,
+      status: 'done',
+      ts: Date.now(),
+    },
+  });
+
+  // Non-streaming first pass so tool-plan JSON never becomes the visible final answer.
+  let draft = await completeChatOnce(message, system, signal);
+  let history = [...message.history, {role: 'user' as const, content: message.text}];
+  for (let round = 0; round < 3; round++) {
+    if (signal?.aborted) throw new Error('aborted');
+    const plan = extractCompanionToolPlan(draft);
+    if (!plan?.toolCalls?.length) break;
+    const observations: string[] = [];
+    for (const call of plan.toolCalls.slice(0, 4)) {
+      const toolName = normalizeCompanionToolName(String(call.tool || ''));
+      const serverId = resolveCompanionServerId(call, toolName, tools);
+      const eventId = `tool:${message.id}:${round}:${serverId || 'x'}:${toolName || 'tool'}`;
+      const args = call.arguments && typeof call.arguments === 'object' ? call.arguments as Record<string, unknown> : {};
+      try {
+        if (serverId === DESKTOP_SERVER_ID || tools.some((t) => t.kind === 'desktop' && t.name === toolName && (!call.serverId || call.serverId === DESKTOP_SERVER_ID))) {
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `desktop.${toolName}`, text: `桌面工具 ${toolName}`, status: 'running', ts: Date.now()}});
+          const toolArgs = toolName === 'computer_use'
+            ? {...args, conversationId: message.sessionId, workspace: message.workspace, projectName: message.projectName}
+            : args;
+          const result = await executeDesktopTool(toolName, toolArgs);
+          const receipt = JSON.stringify(result).slice(0, 8000);
+          observations.push(`desktop:${toolName}: ${receipt}`);
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `desktop.${toolName}`, text: `${toolName} 完成`, status: 'done', receipt, ts: Date.now()}});
+          continue;
+        }
+        const server = mcpServers.find((item) => item.id === serverId)
+          || mcpServers.find((item) => item.tools?.includes(toolName) || item.toolSchemas?.some((schema) => schema.name === toolName));
+        if (!server) {
+          observations.push(`${toolName}: 未找到工具（serverId=${serverId || '∅'}）`);
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: toolName, text: `${toolName}: 未找到服务`, status: 'failed', ts: Date.now()}});
+          continue;
+        }
+        send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'mcp', action: `${server.id}.${toolName}`, text: `调用 ${server.name}/${toolName}`, status: 'running', ts: Date.now()}});
+        const result = await callMcpTool(server, toolName, args);
+        const receipt = JSON.stringify(result).slice(0, 8000);
+        observations.push(`${server.id}:${toolName}: ${receipt}`);
+        send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'mcp', action: `${server.id}.${toolName}`, text: `${toolName} 完成`, status: 'done', receipt, ts: Date.now()}});
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        observations.push(`${serverId || 'tool'}:${toolName}: 失败：${err}`);
+        send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: serverId === DESKTOP_SERVER_ID ? 'tool' : 'mcp', action: serverId === DESKTOP_SERVER_ID ? `desktop.${toolName}` : toolName, text: `${toolName} 失败：${err}`, status: 'failed', receipt: err, ts: Date.now()}});
+      }
+    }
+    history = [
+      ...history,
+      {role: 'assistant' as const, content: draft},
+      {role: 'user' as const, content: `[Tool receipts — facts only]\n${observations.join('\n')}\n说明：launch 回执若含 accessibility.controls，可直接用于 accessibility_action；若 foreground.title 仍是 Pattern，先 focus 再操作。\n请基于以上真实回执给出最终答复；不要再输出 toolCalls JSON，除非确实还需要另一轮工具。没有回执的动作不得声称成功。`},
+    ];
+    draft = await completeChatOnce({
+      ...message,
+      text: history[history.length - 1]!.content,
+      history: history.slice(0, -1),
+    }, system, signal);
+  }
+
+  // Stream only the final natural-language answer.
+  if (draft.trim()) {
+    const chunkSize = 64;
+    for (let i = 0; i < draft.length; i += chunkSize) {
+      send(socket, {type: 'chat.delta', id: message.id, delta: draft.slice(i, i + chunkSize)});
+    }
+  }
+  send(socket, {type: 'chat.done', id: message.id, slot: 'companion'});
+  setAgentState('idle');
+  return draft;
+}
+
 async function askChildAgent(prompt: string, useAgentModel = true): Promise<string> {
   if (!config?.apiKey) throw new Error('未配置模型 API Key');
   const configured = useAgentModel && config.agent?.model
@@ -249,6 +922,7 @@ const server = createServer((req, res) => {
 });
 const sockets = new WebSocketServer({noServer: true});
 const clients = new Set<WebSocket>();
+const activeChats = new Map<string, {controller: AbortController; socket: WebSocket}>();
 function send(socket: WebSocket, value: ServerMessage | Record<string, unknown>) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
 }
@@ -382,6 +1056,7 @@ function recordUsage(provider: string, model: string, usage: any, durationMs?: n
 type SecurityPolicyState = {
   workspaceRoot: string | null;
   enforceWorkspace: boolean;
+  requireRecoveryForWorkspaceWrites: boolean;
   autoApproveBelow: number;
   hardDenyAt: number;
   tierGuide: Array<{tier: number; label: string; meaning: string}>;
@@ -389,6 +1064,7 @@ type SecurityPolicyState = {
 const DEFAULT_SECURITY_POLICY: SecurityPolicyState = {
   workspaceRoot: null,
   enforceWorkspace: true,
+  requireRecoveryForWorkspaceWrites: true,
   autoApproveBelow: 2,
   hardDenyAt: 3,
   tierGuide: [
@@ -406,6 +1082,7 @@ function loadSecurityPolicy(): SecurityPolicyState {
     return {
       workspaceRoot: raw.workspaceRoot ? String(raw.workspaceRoot) : null,
       enforceWorkspace: raw.enforceWorkspace !== false,
+      requireRecoveryForWorkspaceWrites: raw.requireRecoveryForWorkspaceWrites !== false,
       autoApproveBelow: Math.min(3, Math.max(0, Number(raw.autoApproveBelow ?? 2))),
       hardDenyAt: Math.min(3, Math.max(1, Number(raw.hardDenyAt ?? 3))),
       tierGuide: Array.isArray(raw.tierGuide) && raw.tierGuide.length ? raw.tierGuide : [...DEFAULT_SECURITY_POLICY.tierGuide],
@@ -479,6 +1156,221 @@ async function bridgeCall(path: string, body?: unknown, optional = false): Promi
   const text = await res.text();
   return text ? JSON.parse(text) : null;
 }
+
+function recoveryState(value: any): NonNullable<TaskRecord['recovery']>['state'] {
+  const state = String(value?.transaction?.state || '').toLowerCase();
+  if (state === 'active') return 'active';
+  if (state === 'prepared') return 'prepared';
+  if (state === 'committed') return 'committed';
+  if (state === 'rolledback') return 'rolled_back';
+  if (state === 'conflicted') return 'conflicted';
+  return 'recovery_required';
+}
+
+
+function declareRecoveryScopes(task: TaskRecord, fileScopes: string[]): {
+  fileScopes: string[];
+  registryScopes: string[];
+  serviceScopes: string[];
+  scheduledTaskScopes: string[];
+} {
+  const text = `${task.title || ''}\n${task.detail || ''}`;
+  const registryScopes = new Set<string>();
+  const serviceScopes = new Set<string>();
+  const scheduledTaskScopes = new Set<string>();
+
+  for (const match of text.matchAll(/registry-scope\s*[:=]\s*([^\r\n;]+)/gi)) {
+    const value = match[1].trim();
+    if (value) registryScopes.add(value);
+  }
+  for (const match of text.matchAll(/service-scope\s*[:=]\s*([A-Za-z0-9_.-]+)/gi)) {
+    serviceScopes.add(match[1].trim());
+  }
+  for (const match of text.matchAll(/scheduled-task-scope\s*[:=]\s*([^\r\n;]+)/gi)) {
+    const value = match[1].trim();
+    if (!value) continue;
+    scheduledTaskScopes.add(value.startsWith('\\') ? value : `\\${value.replace(/^\\+/, '')}`);
+  }
+
+  // Safe default for registry-oriented workspace tasks: protect a dedicated HKCU hive branch.
+  if (fileScopes.length > 0 && /注册表|registry|HKCU|HKLM/i.test(text)) {
+    registryScopes.add('HKCU\\Software\\PatternAgentOS');
+  }
+
+  return {
+    fileScopes,
+    registryScopes: [...registryScopes],
+    serviceScopes: [...serviceScopes],
+    scheduledTaskScopes: [...scheduledTaskScopes].map((name) => name.startsWith('\\') ? name : `\\${name.replace(/^\\+/, '')}`),
+  };
+}
+
+async function beginTaskRecovery(task: TaskRecord): Promise<string | undefined> {
+  if (task.recovery?.transactionId) return task.recovery.transactionId;
+  const fileScope = task.workspace || securityPolicy.workspaceRoot;
+  const fileScopes = fileScope && existsSync(fileScope) ? [fileScope] : [];
+  const declaredScopes = declareRecoveryScopes(task, fileScopes);
+  const recoveryRequired = process.platform === 'win32'
+    && securityPolicy.requireRecoveryForWorkspaceWrites
+    && !!fileScope;
+  const capabilities = await bridgeCall('/recovery/capabilities', undefined, true);
+  if (!capabilities?.available || fileScopes.length === 0) {
+    task.recovery = {
+      state: 'unavailable',
+      fileScopes: declaredScopes.fileScopes,
+      registryScopes: declaredScopes.registryScopes,
+      serviceScopes: declaredScopes.serviceScopes,
+      scheduledTaskScopes: declaredScopes.scheduledTaskScopes,
+      error: !capabilities?.available ? 'AgentOS recovery runtime is unavailable' : 'No existing workspace scope was declared',
+    };
+    appendJournal({line: `${task.id} RECOVERY_UNAVAILABLE ${task.recovery.error}`, tier: 1, kind: 'recovery', taskId: task.id, decision: 'info'});
+    saveTasks(); announceTask(task);
+    if (recoveryRequired) {
+      throw new Error(`工作区写入已阻止：${task.recovery.error}`);
+    }
+    return undefined;
+  }
+  const result = await bridgeCall('/recovery/begin', {taskId: task.id, mode: 'critical', ...declaredScopes});
+  const transactionId = String(result?.transaction?.id || '');
+  if (!result?.ok || !transactionId || recoveryState(result) !== 'active') {
+    throw new Error(`AgentOS recovery baseline failed: ${result?.stderr || result?.transaction?.error || 'unknown error'}`);
+  }
+  task.recovery = {transactionId, state: 'active', ...declaredScopes};
+  appendJournal({line: `${task.id} RECOVERY_BEGIN ${transactionId} scopes=${fileScopes.join('|')}`, tier: 1, kind: 'recovery', taskId: task.id, decision: 'info'});
+  saveTasks(); announceTask(task);
+  return transactionId;
+}
+
+async function finalizeTaskRecovery(
+  task: TaskRecord,
+  outcome: 'commit' | 'rollback',
+  options: {assumeExclusive?: boolean} = {},
+): Promise<void> {
+  const transactionId = task.recovery?.transactionId;
+  if (!transactionId || task.recovery?.state === 'rolled_back' || (outcome === 'commit' && task.recovery?.state === 'committed')) return;
+  if (task.recovery?.state === 'active') {
+    const prepared = await bridgeCall('/recovery/prepare', {transactionId});
+    task.recovery.state = recoveryState(prepared);
+    if (!prepared?.ok || task.recovery.state !== 'prepared') {
+      task.recovery.error = prepared?.stderr || prepared?.transaction?.error || 'Could not persist recovery after-state';
+      saveTasks(); announceTask(task);
+      throw new Error(`AgentOS prepare failed: ${task.recovery.error}`);
+    }
+  }
+  const operation = outcome === 'rollback' && task.recovery?.state === 'recovery_required' ? 'recover' : outcome;
+  if (operation === 'recover' && !options.assumeExclusive) {
+    throw new Error('中断事务需要显式确认：恢复范围内没有其它进程在事务后写入');
+  }
+  const result = await bridgeCall(`/recovery/${operation}`, {transactionId});
+  task.recovery.state = recoveryState(result);
+  task.recovery.error = result?.transaction?.error || result?.stderr || undefined;
+  appendJournal({
+    line: `${task.id} RECOVERY_${outcome.toUpperCase()} ${transactionId} state=${task.recovery.state}`,
+    tier: 1, kind: 'recovery', taskId: task.id,
+    decision: result?.ok ? 'info' : 'denied',
+  });
+  saveTasks(); announceTask(task);
+  const expected = outcome === 'commit' ? 'committed' : 'rolled_back';
+  if (!result?.ok || task.recovery.state !== expected) {
+    throw new Error(`AgentOS ${outcome} did not complete: ${task.recovery.error || task.recovery.state}`);
+  }
+  if (outcome === 'commit') {
+    const gc = await bridgeCall('/recovery/gc', {maxTransactions: 20, maxAgeDays: 7, maxBytes: 5 * 1024 * 1024 * 1024}, true);
+    if (gc?.transaction?.purgedTransactionIds?.length) {
+      appendJournal({line: `RECOVERY_GC purged=${gc.transaction.purgedTransactionIds.length} bytesAfter=${gc.transaction.bytesAfter}`, kind: 'recovery', decision: 'info'});
+    }
+  }
+}
+
+async function reconcileRecoveryTransactionsOnce(): Promise<boolean> {
+  const capabilities = await bridgeCall('/recovery/capabilities', undefined, true);
+  if (!capabilities?.available) return false;
+  const result = await bridgeCall('/recovery/list', {}, true);
+  if (!result?.ok) return false;
+  const manifests = Array.isArray(result?.transaction) ? result.transaction : [];
+  const latestManifestByTask = new Map<string, any>();
+  for (const manifest of manifests) {
+    const command = String(manifest?.command || '');
+    if (!command.startsWith('detached:')) continue;
+    const taskId = command.slice('detached:'.length);
+    const existing = latestManifestByTask.get(taskId);
+    const createdAt = Date.parse(String(manifest?.createdAt || '')) || 0;
+    const existingCreatedAt = Date.parse(String(existing?.createdAt || '')) || 0;
+    if (!existing || createdAt > existingCreatedAt) latestManifestByTask.set(taskId, manifest);
+  }
+  const correlatedTaskIds = new Set<string>();
+  for (const [taskId, manifest] of latestManifestByTask) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) continue;
+    correlatedTaskIds.add(taskId);
+    const state = String(manifest.state || '').toLowerCase();
+    const fileScopes = Array.isArray(manifest.fileScopes) ? manifest.fileScopes.map(String) : [];
+    if (state === 'committed') {
+      task.recovery = {transactionId: String(manifest.id), state: 'committed', fileScopes, error: manifest.error || undefined};
+      if (['running','queued','awaiting_approval'].includes(task.status)) {
+        task.status = 'done';
+        task.error = undefined;
+        finishTaskRun(task, 'done');
+      }
+      announceTask(task);
+      continue;
+    }
+    if (state === 'rolledback') {
+      task.recovery = {transactionId: String(manifest.id), state: 'rolled_back', fileScopes, error: manifest.error || undefined};
+      if (['running','queued','awaiting_approval'].includes(task.status)) {
+        task.status = 'failed';
+        task.error = manifest.error || 'Pattern restarted after AgentOS rolled the interrupted transaction back';
+        finishTaskRun(task, 'failed', task.error);
+      }
+      announceTask(task);
+      continue;
+    }
+    if (state === 'failed') {
+      task.recovery = {transactionId: String(manifest.id), state: 'unavailable', fileScopes, error: manifest.error || 'AgentOS baseline failed'};
+      if (['running','queued','awaiting_approval'].includes(task.status)) {
+        task.status = 'failed';
+        task.error = task.recovery.error;
+        finishTaskRun(task, 'failed', task.error);
+      }
+      announceTask(task);
+      continue;
+    }
+    if (!['preparing','active','prepared','conflicted','recoveryrequired'].includes(state)) continue;
+    task.recovery = {
+      transactionId: String(manifest.id),
+      state: state === 'prepared' ? 'prepared' : state === 'conflicted' ? 'conflicted' : 'recovery_required',
+      fileScopes,
+      error: manifest.error || (state === 'prepared' ? undefined : 'Pattern restarted before this AgentOS transaction reached a stable outcome'),
+    };
+    if (task.status === 'running' || task.status === 'queued' || task.status === 'awaiting_approval') {
+      task.status = 'failed';
+      task.error = task.recovery.error;
+      finishTaskRun(task, 'failed', task.error);
+    }
+    announceTask(task);
+  }
+  for (const task of tasks) {
+    if (!['running','awaiting_approval'].includes(task.status) || correlatedTaskIds.has(task.id)) continue;
+    task.status = 'failed';
+    task.error = 'Pattern restarted before this task reached a stable outcome';
+    finishTaskRun(task, 'failed', task.error);
+    announceTask(task);
+  }
+  saveTasks();
+  return true;
+}
+async function reconcileRecoveryTransactions(): Promise<void> {
+  if (recoveryReconciled) return;
+  if (recoveryReconciliationInFlight) return recoveryReconciliationInFlight;
+  recoveryReconciliationInFlight = (async () => {
+    recoveryReconciled = await reconcileRecoveryTransactionsOnce();
+  })();
+  try {
+    await recoveryReconciliationInFlight;
+  } finally {
+    recoveryReconciliationInFlight = null;
+  }
+}
 async function notify(title: string, body: string) {
   try {
     await bridgeCall('/notify', {title, body}, true);
@@ -497,8 +1389,10 @@ async function getIdleSeconds(): Promise<number> {
 function buildSystemPrompt(
   memHits: MemoryRecord[],
   _slot: 'companion' | 'executor' = 'companion',
-  context?: {workspace?: string; projectName?: string; attachments?: string[]},
+  context?: {workspace?: string; projectName?: string; attachments?: string[]; allowSubAgents?: boolean},
 ) {
+  // Layers: persona (user) + primary runtime (product) + rules. Tool catalog is appended per-turn in runCompanionToolLoop.
+  // Spec: docs/system-prompt.md
   const persona = config?.persona || 'You are Pattern, a desktop companion defined by the user.';
   const name = config?.personaName || 'Pattern';
   const user = config?.userName || 'User';
@@ -507,8 +1401,15 @@ function buildSystemPrompt(
     ? memHits.map((m) => `- (${categoryLabel(m.category)}, imp=${m.importance.toFixed(2)}) ${m.text}`).join('\n')
     : '(no extra retrieval hits this turn)';
   const now = new Date();
-  const env = `Local time: ${now.toLocaleString('zh-CN')}. You are a resident desktop companion, not a website chatbot.${plaaState?`\nPLAA emotional state: ${plaaState}`:''}`;
-  const role = 'You are the primary agent. Keep one coherent context for conversation and work. When the user clearly asks you to act, delegate execution to a child agent and return only a concise result summary; do not pollute the main context with child-agent implementation chatter.';
+  const allowSubAgents = context?.allowSubAgents !== false;
+  const env = `Local time: ${now.toLocaleString('zh-CN')}. You are Pattern, a resident desktop companion agent (not a website chatbot).${plaaState?`\nPLAA emotional state: ${plaaState}`:''}`;
+  const role = [
+    'You are the primary agent: you own conversation, tools, and the user-facing answer.',
+    allowSubAgents
+      ? 'Sub-agents are optional workers; the runtime may spawn an executor for heavy desktop automation when enabled.'
+      : 'Sub-agents are DISABLED this turn; complete work yourself using the tools listed later in this prompt.',
+    'Keep the main chat as the result surface; do not dump low-level worker chatter into the user-facing reply.',
+  ].join(' ');
   const workspaceBlock = context?.workspace
     ? `[Active project workspace]
 - Name: ${context.projectName || 'project'}
@@ -522,7 +1423,7 @@ ${context.attachments?.length ? `- User attached paths this turn:\n${context.att
 [Identity]
 - Your name: ${name}
 - User address: ${user}
-- Agent role: primary agent
+- Agent role: primary desktop companion
 - ${role}
 [MEMORY-INDEX | always know what you remember]
 ${index}
@@ -531,11 +1432,36 @@ ${details}
 [Environment]
 ${env}
 ${workspaceBlock}
+[Capability honesty]
+- Tools available this turn are listed only in the later [Primary-agent tools] / tool catalog section (desktop + MCP).
+- If the catalog shows no desktop tools, OS Bridge is offline — you cannot press keys or open apps until Bridge is connected.
+- If the catalog shows no MCP tools, none are enabled — do not invent plugin capabilities.
+- Sub-agents this turn: ${allowSubAgents ? 'enabled' : 'disabled'}.
 [Rules]
 - Use memories naturally; do not recite entry ids.
 - If a memory conflicts with the user's latest statement, prefer the latest statement.
-- Never claim computer-use success without tool receipts.
-- Never claim you read or modified project files unless tool receipts or attached contents prove it.`;
+- Never claim computer-use / desktop / MCP success without tool receipts.
+- Never claim you pressed keys, clicked, opened apps, launched programs, or used accessibility unless a receipt proves it.
+- Never role-play actions in pure chat. Either tools produced receipts, or you must say you cannot act yet and why (Bridge/MCP/permissions).
+- Do not ask the user to open the tasks page or press a handoff button to make work happen.
+- Never claim you read or modified project files unless tool receipts or attached contents prove it.
+- When the user asks to open an app or operate the desktop, follow [Tool calling method].
+[Tool calling method]
+- Need tools? Reply with JSON ONLY (no fences, no extra prose):
+  {"toolCalls":[{"serverId":"desktop","tool":"SHORT_NAME","arguments":{...}}],"final":""}
+- serverId: "desktop" for OS Bridge, or MCP server id from catalog.
+- tool SHORT NAMES ONLY: launch, key, type, click, scroll, foreground, focus, accessibility_tree, accessibility_action, screenshot, computer_use.
+- NEVER set tool to "desktop:launch" or "desktop.launch" — put "desktop" in serverId.
+- Open app: {"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}
+  Known apps: notepad, calc, calculator, explorer, cmd, powershell, browser, settings, paint, snippingtool. Or arguments.command.
+  Launch receipt includes focus attempt, foreground title, summarized UIA tree.
+- Focus if Pattern still frontmost: {"serverId":"desktop","tool":"focus","arguments":{"hints":["Calculator","计算器"]}}
+- UIA invoke: {"serverId":"desktop","tool":"accessibility_action","arguments":{"action":"invoke","name":"..."}}
+- Keys/type: {"serverId":"desktop","tool":"key","arguments":{"key":"enter"}} / {"serverId":"desktop","tool":"type","arguments":{"text":"..."}}
+- Multi-step desktop UI closed loop (screenshot+UIA each step): {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}
+  Prefer computer_use for multi-step UI goals; atomic tools for short single actions.
+- MCP: {"serverId":"<id>","tool":"<name>","arguments":{}} only if listed in this turn's catalog.
+- After receipts: natural-language answer; only claim what receipts prove. If foreground is still Pattern, do not claim another app was operated.`;
 }
 function listJournal(limit = 80, query?: string | null) {
   try {
@@ -571,6 +1497,148 @@ function cleanupJournal() {
   }
 }
 cleanupJournal();
+
+// ---- Project/global file-change buffer (for proactive inject + dreaming) ----
+type FileChangeEntry = {
+  path: string;
+  kind: string;
+  ts: number;
+  scope: string; // global | project:<id>
+  projectId?: string;
+  projectName?: string;
+  size?: number;
+  excerpt?: string;
+};
+const FILE_CHANGE_BUFFER_MAX = 400;
+let fileChangeBuffer: FileChangeEntry[] = [];
+let lastProactiveInjectAt = 0;
+let lastDreamDay = '';
+const DEFAULT_WATCH_IGNORES = ['node_modules', '.git', 'dist', 'target', 'build', '.next', '__pycache__', '.reasonix', 'release'];
+
+function loadProjectsForWatch(): Array<{id: string; name: string; path: string}> {
+  try {
+    // Desktop persists projects in localStorage; sidecar may receive via config later.
+    // Also check projects.json under dataDir if present.
+    const file = join(dataDir, 'projects.json');
+    if (!existsSync(file)) return [];
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((p: any) => p && typeof p.path === 'string' && typeof p.id === 'string')
+      .map((p: any) => ({id: String(p.id), name: String(p.name || p.id), path: String(p.path)}));
+  } catch {
+    return [];
+  }
+}
+
+function shouldIgnoreWatchPath(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, '/').toLowerCase();
+  return DEFAULT_WATCH_IGNORES.some((seg) => norm.includes(`/${seg}/`) || norm.endsWith(`/${seg}`));
+}
+
+function pushFileChange(entry: FileChangeEntry) {
+  if (shouldIgnoreWatchPath(entry.path)) return;
+  // merge same path within buffer: keep latest
+  fileChangeBuffer = fileChangeBuffer.filter((item) => item.path !== entry.path || item.scope !== entry.scope);
+  fileChangeBuffer.unshift(entry);
+  if (fileChangeBuffer.length > FILE_CHANGE_BUFFER_MAX) fileChangeBuffer = fileChangeBuffer.slice(0, FILE_CHANGE_BUFFER_MAX);
+}
+
+function listFileChangesSince(sinceTs: number, scope?: string, limit = 40): FileChangeEntry[] {
+  return fileChangeBuffer
+    .filter((item) => item.ts >= sinceTs && (!scope || item.scope === scope || (scope === 'global' && item.scope === 'global')))
+    .slice(0, limit);
+}
+
+function formatFileDeltaForPrompt(entries: FileChangeEntry[], maxChars = 3500): string {
+  if (!entries.length) return '(no file changes since last proactive/dream window)';
+  const lines: string[] = [`File changes (${entries.length} recent):`];
+  let used = lines[0].length;
+  for (const e of entries) {
+    const head = `- [${e.scope}] ${e.kind} ${e.path}${e.size != null ? ` (${e.size}B)` : ''}`;
+    const body = e.excerpt ? `\n  excerpt: ${e.excerpt.replace(/\s+/g, ' ').slice(0, 180)}` : '';
+    const line = head + body;
+    if (used + line.length + 1 > maxChars) {
+      lines.push(`- … (${entries.length - lines.length + 1} more omitted)`);
+      break;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join('\n');
+}
+
+function resolveWatchScope(filePath: string): {scope: string; projectId?: string; projectName?: string} {
+  const norm = filePath.replace(/\\/g, '/').toLowerCase();
+  for (const project of loadProjectsForWatch()) {
+    const root = project.path.replace(/\\/g, '/').toLowerCase().replace(/\/$/, '');
+    if (norm === root || norm.startsWith(root + '/')) {
+      return {scope: `project:${project.id}`, projectId: project.id, projectName: project.name};
+    }
+  }
+  return {scope: 'global'};
+}
+
+async function runDreamingJob(force = false): Promise<{ok: boolean; text?: string; error?: string}> {
+  if (!config?.apiKey) return {ok: false, error: 'no model'};
+  const dayKey = new Date().toISOString().slice(0, 10);
+  if (!force && lastDreamDay === dayKey) return {ok: true, text: 'already dreamed today'};
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const changes = listFileChangesSince(since, undefined, 80);
+  const recentConvHint = `Local day ${dayKey}. Summarize the companion's day for durable memory.`;
+  const delta = formatFileDeltaForPrompt(changes, 6000);
+  const system = `You are Pattern's dreaming process. Compress the last day into durable daily memories.
+Return JSON only: {"memories":[{"text":"string","category":"event|reference|fact|preference","importance":0.0-1.0,"scope":"global|project","projectId":"optional"}]}.
+Rules: short factual bullets; no role-play; do not invent files not listed; if no signal, return {"memories":[]}.`;
+  const user = `${recentConvHint}\n\n${delta}\n\nAlso consider this purpose: consolidate file awareness into daily memory for later retrieval.`;
+  try {
+    const anthropic = config.provider.toLowerCase().includes('anthropic');
+    const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions'), anthropic
+      ? {
+          method: 'POST',
+          headers: {'content-type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01'},
+          body: JSON.stringify({model: config.model, max_tokens: 1200, temperature: 0.2, system, messages: [{role: 'user', content: user}]}),
+        }
+      : {
+          method: 'POST',
+          headers: {'content-type': 'application/json', authorization: `Bearer ${config.apiKey}`},
+          body: JSON.stringify({model: config.model, temperature: 0.2, messages: [{role: 'system', content: system}, {role: 'user', content: user}]}),
+        });
+    if (!response.ok) return {ok: false, error: `dream model ${response.status}`};
+    const json: any = await response.json();
+    recordUsage(config.provider, config.model, json.usage);
+    const raw = String(anthropic ? json.content?.map((item: any) => item.text).join('') : json.choices?.[0]?.message?.content || '');
+    const match = raw.match(/\{[\s\S]*\}/);
+    const parsed = match ? JSON.parse(match[0]) : {memories: []};
+    const items = Array.isArray(parsed.memories) ? parsed.memories : [];
+    let written = 0;
+    for (const item of items.slice(0, 12)) {
+      const body = String(item.text || '').trim();
+      if (!body) continue;
+      const scope = String(item.scope || 'global');
+      const projectId = item.projectId ? String(item.projectId) : '';
+      const prefix = scope.startsWith('project') || projectId
+        ? `[daily:${dayKey}][project:${projectId || scope.replace(/^project:/, '')}] `
+        : `[daily:${dayKey}][global] `;
+      await memory.upsertSimilar({
+        text: `${prefix}${body}`.slice(0, 2000),
+        category: ['event', 'reference', 'fact', 'preference', 'feedback'].includes(String(item.category)) ? String(item.category) : 'event',
+        importance: Math.max(0.2, Math.min(0.95, Number(item.importance) || 0.55)),
+        sourceConv: `dream:${dayKey}:${scope}`,
+      });
+      written += 1;
+    }
+    // still run decay consolidate
+    memory.consolidate(dayKey);
+    lastDreamDay = dayKey;
+    try { writeFileSync(join(dataDir, 'last-dream-day.txt'), dayKey); } catch { /* ignore */ }
+    return {ok: true, text: `dreamed ${written} memories for ${dayKey}`};
+  } catch (error) {
+    return {ok: false, error: error instanceof Error ? error.message : String(error)};
+  }
+}
+
+try { lastDreamDay = readFileSync(join(dataDir, 'last-dream-day.txt'), 'utf8').trim(); } catch { lastDreamDay = ''; }
 function loadFileWatchConfig(): FileWatchConfig {
   const file = join(dataDir, 'file-watch.json');
   if (!existsSync(file)) return {...defaultFileWatchConfig};
@@ -662,6 +1730,21 @@ function finishTaskRun(task: TaskRecord, status: TaskRun['status'], error?: stri
   if (run) { run.status = status; run.finishedAt = Date.now(); run.error = error; }
   task.activeRunId = undefined;
 }
+function enqueueComputerUseTask(task: TaskRecord) {
+  if (queuedComputerUseTaskIds.has(task.id)) return;
+  queuedComputerUseTaskIds.add(task.id);
+  const execute = async () => {
+    try {
+      while (task.status === 'paused') await new Promise((resolve) => setTimeout(resolve, 300));
+      if (['cancelled','done','failed','scheduled'].includes(task.status)) return;
+      await runComputerUseTask(task);
+    } finally {
+      queuedComputerUseTaskIds.delete(task.id);
+    }
+  };
+  computerUseQueue = computerUseQueue.then(execute, execute);
+  void computerUseQueue;
+}
 /** Fire persisted execution tasks. Each firing enters the normal approval pipeline and is retained in run history. */
 async function scheduledTaskTick() {
   const now = new Date(); const day = `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()}`;
@@ -673,7 +1756,7 @@ async function scheduledTaskTick() {
     task.status = 'queued'; task.error = undefined; startTaskRun(task);
     task.nextRunAt = nextScheduleAt(schedule!, now.getTime());
     if (schedule?.kind === 'once') schedule.enabled = false;
-    saveTasks(); announceTask(task); void runComputerUseTask(task);
+    saveTasks(); announceTask(task); enqueueComputerUseTask(task);
   }
 }
 async function healthTick() {
@@ -703,6 +1786,17 @@ function emitFileWatch(item: FileWatchEvent) {
   fileWatchEvents.unshift(item);
   fileWatchEvents = fileWatchEvents.slice(0, 200);
   broadcast({type: 'filewatch.event', item});
+  try {
+    const scopeInfo = resolveWatchScope(String((item as any).path || ''));
+    pushFileChange({
+      path: String((item as any).path || ''),
+      kind: String((item as any).kind || 'change'),
+      ts: Date.now(),
+      scope: scopeInfo.scope,
+      projectId: scopeInfo.projectId,
+      projectName: scopeInfo.projectName,
+    });
+  } catch { /* ignore */ }
 }
 async function decideFileRead(path: string, kind: string): Promise<{read: boolean; reason: string}> {
   if (!config?.apiKey) return {read: false, reason: '未配置模型，不自动读取'};
@@ -741,6 +1835,17 @@ async function processFileChange(path: string, kind: string) {
     if (size > fileWatchConfig.maxBytes) { item.decision='ignored'; item.reason=`文件 ${size} bytes，超过读取上限`; emitFileWatch(item); return; }
     const content = readFileSync(path, 'utf8');
     item.decision='read'; item.reason=decision.reason; emitFileWatch(item);
+    const scopeInfo = resolveWatchScope(path);
+    pushFileChange({
+      path,
+      kind: item.kind || 'change',
+      ts: Date.now(),
+      scope: scopeInfo.scope,
+      projectId: scopeInfo.projectId,
+      projectName: scopeInfo.projectName,
+      size: content.length,
+      excerpt: content.slice(0, 400),
+    });
     const memoryItem = await memory.upsertSimilar({text:`文件变化 ${path}：${content.slice(0, 1200)}`, category:'reference', importance:0.45, sourceConv:`filewatch:${item.id}`});
     broadcast({type:'memory.changed'});
     const impulse = proactive.manualImpulse({type:'file_change', reason:`我阅读了变化的文件 ${path}`, topicKey:`file:${path}`});
@@ -751,8 +1856,16 @@ async function processFileChange(path: string, kind: string) {
 function restartFileWatchers() {
   for (const watcher of fileWatchers) watcher.close();
   fileWatchers = [];
-  if (!fileWatchConfig.enabled) return;
-  for (const root of fileWatchConfig.paths) {
+  if (!fileWatchConfig.enabled && loadProjectsForWatch().length === 0) return;
+  const roots = new Map<string, string>(); // path -> scope label
+  if (fileWatchConfig.enabled) {
+    for (const root of fileWatchConfig.paths) roots.set(root, 'global');
+  }
+  // Auto-watch registered project folders
+  for (const project of loadProjectsForWatch()) {
+    if (project.path) roots.set(project.path, `project:${project.id}`);
+  }
+  for (const root of roots.keys()) {
     if (!existsSync(root)) continue;
     try {
       const watcher = watch(root, {recursive:true}, (kind, filename) => {
@@ -816,13 +1929,19 @@ async function streamChat(
   message: ChatRequest,
   system: string,
   slot: AgentSlot = 'companion',
+  signal?: AbortSignal,
+  options: {emitStarted?: boolean; emitDone?: boolean; setIdleOnDone?: boolean} = {},
 ): Promise<string> {
   if (!config) throw new Error('runtime is not configured');
+  const emitStarted = options.emitStarted !== false;
+  const emitDone = options.emitDone !== false;
+  const setIdleOnDone = options.setIdleOnDone !== false;
   setAgentState('thinking');
-  send(socket, {type: 'chat.started', id: message.id, slot});
+  if (emitStarted) send(socket, {type: 'chat.started', id: message.id, slot});
   const anthropic = config.provider.toLowerCase().includes('anthropic');
   const startedAt = Date.now();
   let streamUsage: any;
+  const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions'), anthropic
     ? {
         method: 'POST',
@@ -838,6 +1957,7 @@ async function streamChat(
           system,
           messages: [...message.history, {role: 'user', content: message.text}],
         }),
+        signal: requestSignal,
       }
     : {
         method: 'POST',
@@ -851,6 +1971,7 @@ async function streamChat(
           stream_options: {include_usage: true},
           messages: [{role: 'system', content: system}, ...message.history, {role: 'user', content: message.text}],
         }),
+        signal: requestSignal,
       });
   if (!response.ok) throw new Error(`model API status ${response.status}: ${(await response.text()).slice(0, 300)}`);
   if (!response.body) throw new Error('model API returned empty body');
@@ -883,8 +2004,8 @@ async function streamChat(
     }
   }
   if (streamUsage) recordUsage(config.provider, config.model, streamUsage, Date.now() - startedAt);
-  send(socket, {type: 'chat.done', id: message.id, slot});
-  setAgentState('idle');
+  if (emitDone) send(socket, {type: 'chat.done', id: message.id, slot});
+  if (setIdleOnDone) setAgentState('idle');
   return full;
 }
 function heuristicExtract(userText: string): Array<{text: string; category: string; importance: number}> {
@@ -1005,7 +2126,14 @@ function scheduleFromText(text: string): TaskSchedule | undefined {
   const every = text.match(/(?:每隔|每)\s*(\d+)\s*(?:分钟|分|minutes?)/i);
   return every ? {kind:'interval', intervalMinutes:Math.max(1, Number(every[1])), enabled:true} : undefined;
 }
-async function createTaskFromText(title: string, detail = '', schedule?: TaskSchedule, workflow?: TaskRecord['workflow'], plan?: TaskRecord['plan']) {
+async function createTaskFromText(
+  title: string,
+  detail = '',
+  schedule?: TaskSchedule,
+  workflow?: TaskRecord['workflow'],
+  plan?: TaskRecord['plan'],
+  context?: {conversationId?: string; workspace?: string; projectName?: string},
+) {
   const normalizedSchedule = schedule || scheduleFromText(`${title}\n${detail}`);
   const task: TaskRecord = {
     id: randomUUID(),
@@ -1013,17 +2141,20 @@ async function createTaskFromText(title: string, detail = '', schedule?: TaskSch
     detail: detail || title,
     status: normalizedSchedule ? 'scheduled' : 'queued',
     createdAt: new Date().toLocaleString('zh-CN'),
+    conversationId: context?.conversationId,
+    workspace: context?.workspace,
+    projectName: context?.projectName,
     steps: [],
     riskTier: classifyTaskTier(title, detail || title),
     schedule: normalizedSchedule,
     plan: plan?.filter((step) => step?.title?.trim() && step?.detail?.trim()).slice(0, 30),
-    nextRunAt: normalizedSchedule ? Date.now() : undefined,
+    nextRunAt: normalizedSchedule ? nextScheduleAt(normalizedSchedule) : undefined,
     workflow,
   };
   tasks.unshift(task);
   saveTasks();
   announceTask(task);
-  if (!normalizedSchedule) void runComputerUseTask(task);
+  if (!normalizedSchedule) enqueueComputerUseTask(task);
   return task;
 }
 function announceTask(task: TaskRecord) {
@@ -1042,16 +2173,25 @@ async function chat(socket: WebSocket, message: ChatRequest) {
     send(socket, {type: 'chat.error', id: message.id, message: 'runtime is not configured'});
     return;
   }
+  const controller = new AbortController();
+  activeChats.set(message.id, {controller, socket});
   try {
+    const allowSubAgents = message.allowSubAgents !== false;
     const routed = message.slot || (await classifyRoute(message.text)).slot;
-    if (routed === 'executor') {
+    // Only spawn the desktop executor worker when sub-agents are enabled.
+    // When disabled, primary agent keeps the chat turn and uses tools itself.
+    if (allowSubAgents && routed === 'executor') {
       const title = taskTitleFromText(message.text);
-      const task = await createTaskFromText(title, message.text, scheduleFromText(message.text));
+      const task = await createTaskFromText(title, message.text, scheduleFromText(message.text), undefined, undefined, {
+        conversationId: message.sessionId,
+        workspace: message.workspace,
+        projectName: message.projectName,
+      });
       send(socket, {type: 'chat.started', id: message.id, slot: 'executor'});
       send(socket, {
         type: 'chat.delta',
         id: message.id,
-        delta: `已交给子代理：${task.title}\n任务已创建，主对话只保留结果摘要；可在任务页与审查窗跟踪进度。`,
+        delta: `好的，我来处理：${task.title}\n已开始桌面执行（子 Agent 执行器）。进度会同步在这条对话里。`,
       });
       send(socket, {type: 'chat.done', id: message.id, slot: 'executor'});
       return;
@@ -1067,8 +2207,10 @@ async function chat(socket: WebSocket, message: ChatRequest) {
         type: 'chat.event',
         id: message.id,
         event: {
+          id: `workspace:${message.workspace}`,
           kind: 'workspace',
           text: ('工作区隔离已绑定 · ' + (message.projectName || '') + ' · ' + message.workspace).replace(/\s+·/g, ' ·').trim(),
+          status: 'done',
           ts: Date.now(),
         },
       });
@@ -1077,8 +2219,9 @@ async function chat(socket: WebSocket, message: ChatRequest) {
       workspace: message.workspace,
       projectName: message.projectName,
       attachments: message.attachments,
+      allowSubAgents,
     });
-    const full = await streamChat(socket, message, system, 'companion');
+    const full = await runCompanionToolLoop(socket, message, system, controller.signal);
     void extractMemories(message.text, full, message.sessionId).then(() => {
       const related = memoryProposals.filter((item) => item.sourceConv === (message.sessionId || null)).slice(0, 5);
       if (related.length) {
@@ -1086,8 +2229,10 @@ async function chat(socket: WebSocket, message: ChatRequest) {
           type: 'chat.event',
           id: message.id,
           event: {
+            id: `memory:proposals:${message.sessionId || message.id}`,
             kind: 'memory',
             text: `待确认记忆 ${related.length} 条：${related.map((item) => item.text).join(' / ').slice(0, 160)}`,
+            status: 'done',
             ts: Date.now(),
           },
         });
@@ -1095,11 +2240,14 @@ async function chat(socket: WebSocket, message: ChatRequest) {
     });
   } catch (error) {
     setAgentState('idle');
-    send(socket, {
-      type: 'chat.error',
-      id: message.id,
-      message: error instanceof Error ? error.message : String(error),
-    });
+    if (controller.signal.aborted) send(socket, {type: 'chat.cancelled', id: message.id});
+    else send(socket, {
+        type: 'chat.error',
+        id: message.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+  } finally {
+    if (activeChats.get(message.id)?.controller === controller) activeChats.delete(message.id);
   }
 }
 async function classifyRoute(text:string) {
@@ -1135,15 +2283,32 @@ async function decideProactive(chain: ProactiveChain): Promise<ProactiveDecision
   if (!config?.apiKey) throw new Error('未配置模型，无法生成 AI 主动消息');
   const hits = await memory.search(`${chain.purpose}\n${chain.context || ''}`, 5);
   if (hits.length) memory.touch(hits.map((item) => item.id));
-  const system = `${buildSystemPrompt(hits)}\n[Proactive wake-up]\nYou may call emit_proactive_message once, schedule_next_wakeup once, both, or neither. Never put a user-visible message in normal text. Do not use a schedule earlier than five minutes from now.`;
-  const prompt = `Objective: ${chain.purpose}\nContext: ${chain.context || '(none)'}\nCurrent local time: ${new Date().toLocaleString('zh-CN')}\nThis is wake-up #${chain.consecutiveSilentRuns + 1}. Decide whether to speak and/or schedule the next check.`;
+  const system = `${buildSystemPrompt(hits)}
+[Proactive wake-up]
+You are the user's companion, not a notification template.
+Speak like a real person who knows them: short, specific, natural, in the companion's language and personality.
+You may call emit_proactive_message once, schedule_next_wakeup once, both, or neither.
+Never put a user-visible message in normal assistant text — only via emit_proactive_message.
+Do not use canned lines such as "It is late. Save your work and get some rest." or bare internal reasons.
+If you speak, invent one fresh human sentence grounded in the objective, memory, and current local time.
+Do not schedule earlier than five minutes from now.`;
+  const since = lastProactiveInjectAt || (Date.now() - 6 * 60 * 60 * 1000);
+  const deltaEntries = listFileChangesSince(since, undefined, 30);
+  const fileDelta = formatFileDeltaForPrompt(deltaEntries, 2500);
+  const prompt = `Objective: ${chain.purpose}
+Context: ${chain.context || '(none)'}
+Current local time: ${new Date().toLocaleString('zh-CN')}
+This is wake-up #${chain.consecutiveSilentRuns + 1}.
+File awareness since last proactive window:
+${fileDelta}
+If you choose to speak, write one natural companion message (not a system notice). You may briefly reference real file changes above when relevant; do not invent paths. Keep it under 80 Chinese characters or 2 short English sentences.`;
   const anthropic = config.provider.toLowerCase().includes('anthropic');
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions'), anthropic ? {
     method:'POST', headers:{'content-type':'application/json','x-api-key':config.apiKey,'anthropic-version':'2023-06-01'},
     body:JSON.stringify({model:config.model,max_tokens:360,system,messages:[{role:'user',content:prompt}],tools:proactiveTools.map((tool) => ({name:tool.function.name,description:tool.function.description,input_schema:tool.function.parameters}))})
   } : {
     method:'POST', headers:{'content-type':'application/json',authorization:`Bearer ${config.apiKey}`},
-    body:JSON.stringify({model:config.model,temperature:0,messages:[{role:'system',content:system},{role:'user',content:prompt}],tools:proactiveTools,tool_choice:'auto'})
+    body:JSON.stringify({model:config.model,temperature:0.8,messages:[{role:'system',content:system},{role:'user',content:prompt}],tools:proactiveTools,tool_choice:'auto'})
   });
   if (!response.ok) throw new Error(`主动模型返回 ${response.status}`);
   const json:any = await response.json();
@@ -1256,7 +2421,7 @@ async function handleRelayEnvelope(env: {id:string;from:string;role:string;type:
   if (!text) return;
   if ((await classifyRoute(text)).slot === 'executor') {
           const task = await createTaskFromText(taskTitleFromText(text), text, scheduleFromText(text));
-    await relay.publish(relay.createEnvelope({role:'companion', type:'chat', body:`已交给子代理：${task.title}。结果会同步到任务页。`}));
+    await relay.publish(relay.createEnvelope({role:'companion', type:'chat', body:`好的，我来处理：${task.title}。进度会同步回来。`}));
     return;
   }
   const reply = await companionReply(text);
@@ -1306,6 +2471,7 @@ async function deliverProactive(input: {body: string; type: string; reason: stri
   await telegramSend(input.body);
   await emailSend(`${config?.personaName || 'Pattern'} · ${input.origin === 'ai' ? '主动消息' : '提醒'}`, input.body);
   await sendToPlugins(input.body, input.origin === 'ai' ? 'proactive' : 'notification');
+  lastProactiveInjectAt = Date.now();
   broadcast({type: 'proactive.impulse', item});
   broadcast({type: 'proactive.inbox.updated', item});
   try { await relay.publish(relay.createEnvelope({role: 'companion', type: 'proactive', body: input.body})); }
@@ -1351,7 +2517,7 @@ async function handleImpulse(raw: ReturnType<ProactiveEngine['evaluateTriggers']
   if (!admitted) return null;
   const id = `trigger:${admitted.topicKey}`;
   if (proactive.listChains(200).some((item) => item.id === id)) return null;
-  const chain = proactive.createChain({id, kind: 'autonomous', purpose: admitted.reason, context: JSON.stringify(admitted.payload), nextRunAt: Date.now(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', recurrence: null, sourceConversationId: null});
+  const chain = proactive.createChain({id, kind: force ? 'required_reminder' : 'autonomous', purpose: admitted.reason, context: JSON.stringify(admitted.payload), nextRunAt: Date.now(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', recurrence: null, sourceConversationId: null});
   await runProactiveChain(proactive.runNow(chain.id) || chain);
   return proactive.list(1)[0] || null;
 }
@@ -1386,9 +2552,10 @@ function classifyTaskTier(title: string, detail: string): number {
 async function waitApproval(taskId: string, step: TaskStep, screenshotBase64?: string) {
   broadcast({type: 'task.approval_required', taskId, step, screenshotBase64});
   return await new Promise<boolean>((resolve) => {
-    approvalWaiters.set(taskId, {resolve});
+    const waiter = {resolve};
+    approvalWaiters.set(taskId, waiter);
     setTimeout(() => {
-      if (approvalWaiters.has(taskId)) {
+      if (approvalWaiters.get(taskId) === waiter) {
         approvalWaiters.delete(taskId);
         resolve(false);
       }
@@ -1399,6 +2566,7 @@ async function runComputerUseTask(task: TaskRecord) {
   if (!task.activeRunId) startTaskRun(task);
   task.status = 'running';
   task.steps = [];
+  task.recovery = undefined;
   saveTasks();
   setAgentState('executing');
   announceTask(task);
@@ -1423,6 +2591,7 @@ async function runComputerUseTask(task: TaskRecord) {
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
       if (task.status === 'cancelled') {
+        await finalizeTaskRecovery(task, 'rollback');
         finishTaskRun(task, 'cancelled'); saveTasks(); announceTask(task);
         setAgentState('idle');
         return;
@@ -1470,6 +2639,7 @@ async function runComputerUseTask(task: TaskRecord) {
           step.status = 'failed';
           task.status = 'cancelled';
           task.error = 'rejected or timed out';
+          await finalizeTaskRecovery(task, 'rollback');
           finishTaskRun(task, 'cancelled', task.error);
           saveTasks();
           setAgentState('idle');
@@ -1486,6 +2656,7 @@ async function runComputerUseTask(task: TaskRecord) {
         await new Promise((resolve) => setTimeout(resolve, Math.min(5000, Math.max(300, Number(action.amount) || 1000))));
         step.receipt = '等待完成';
       } else {
+        await beginTaskRecovery(task);
         if (action.type === 'uiaInvoke' || action.type === 'uiaSetValue') {
           try {
             await bridgeCall('/accessibility/action', {
@@ -1514,6 +2685,7 @@ async function runComputerUseTask(task: TaskRecord) {
       if (completed) break;
     }
     if (!completed) throw new Error('达到 20 步安全上限，任务未显式完成');
+    await finalizeTaskRecovery(task, 'commit');
     task.status = 'done';
     finishTaskRun(task, 'done');
     saveTasks();
@@ -1523,8 +2695,15 @@ async function runComputerUseTask(task: TaskRecord) {
     await telegramSend(`任务已完成：${task.title}`);
     await emailSend(`${config?.personaName || 'Pattern'} · 任务已完成`, task.title);
   } catch (error) {
+    let recoveryError: string | undefined;
+    try {
+      await finalizeTaskRecovery(task, 'rollback');
+    } catch (rollbackError) {
+      recoveryError = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+    }
     task.status = 'failed';
     task.error = error instanceof Error ? error.message : String(error);
+    if (recoveryError) task.error += `\nRecovery: ${recoveryError}`;
     finishTaskRun(task, 'failed', task.error);
     saveTasks();
     setAgentState('idle');
@@ -1537,6 +2716,10 @@ async function handleClient(socket: WebSocket, message: ClientMessage) {
       case 'chat.send':
         await chat(socket, message);
         break;
+      case 'chat.cancel': {
+        activeChats.get(message.id)?.controller.abort();
+        break;
+      }
       case 'memory.list': {
         const items = memory.list(message.query, message.category);
         send(socket, {type: 'memory.list.result', id: message.id, items});
@@ -1633,10 +2816,11 @@ case 'journal.list': {
         const next = (message as any).policy || {};
         if ('workspaceRoot' in next) securityPolicy.workspaceRoot = next.workspaceRoot ? String(next.workspaceRoot) : null;
         if ('enforceWorkspace' in next) securityPolicy.enforceWorkspace = next.enforceWorkspace !== false;
+        if ('requireRecoveryForWorkspaceWrites' in next) securityPolicy.requireRecoveryForWorkspaceWrites = next.requireRecoveryForWorkspaceWrites !== false;
         if ('autoApproveBelow' in next) securityPolicy.autoApproveBelow = Math.min(3, Math.max(0, Number(next.autoApproveBelow)));
         if ('hardDenyAt' in next) securityPolicy.hardDenyAt = Math.min(3, Math.max(1, Number(next.hardDenyAt)));
         saveSecurityPolicy();
-        appendJournal({line: `security.policy updated enforce=${securityPolicy.enforceWorkspace} root=${securityPolicy.workspaceRoot || '-'} auto<${securityPolicy.autoApproveBelow} deny>=${securityPolicy.hardDenyAt}`, kind: 'policy', decision: 'info'});
+        appendJournal({line: `security.policy updated enforce=${securityPolicy.enforceWorkspace} requireRecovery=${securityPolicy.requireRecoveryForWorkspaceWrites} root=${securityPolicy.workspaceRoot || '-'} auto<${securityPolicy.autoApproveBelow} deny>=${securityPolicy.hardDenyAt}`, kind: 'policy', decision: 'info'});
         send(socket, {type: 'security.policy', id: message.id, policy: securityPolicy});
         break;
       }
@@ -1815,8 +2999,12 @@ case 'journal.list': {
         break;
       }
       case 'task.create': {
-        const task = await createTaskFromText(message.title, message.detail || '', message.schedule, undefined, message.plan);
-        send(socket, {type: 'task.list.result', id: message.id, tasks});
+        const task = await createTaskFromText(message.title, message.detail || '', message.schedule, undefined, message.plan, {
+          conversationId: message.conversationId,
+          workspace: message.workspace,
+          projectName: message.projectName,
+        });
+        send(socket, {type: 'task.list.result', id: message.id, tasks, createdTask: task});
         // ensure caller still sees the created task via list result
         void task;
         break;
@@ -1870,6 +3058,35 @@ case 'journal.list': {
         send(socket, {type: 'task.list.result', id: message.id, tasks});
         break;
       }
+      case 'recovery.status': {
+        const capabilities = await bridgeCall('/recovery/capabilities', undefined, true);
+        const listed = capabilities?.available ? await bridgeCall('/recovery/list', {}, true) : null;
+        const manifests = Array.isArray(listed?.transaction) ? listed.transaction : [];
+        const openStates = new Set(['Preparing','Active','Prepared','RollingBack','Conflicted','RecoveryRequired']);
+        send(socket, {
+          type: 'recovery.status.result', id: message.id,
+          available: !!capabilities?.available,
+          store: capabilities?.store,
+          transactionCount: manifests.length,
+          openCount: manifests.filter((manifest:any) => openStates.has(String(manifest?.state))).length,
+          error: capabilities?.available ? undefined : 'AgentOS recovery runtime is unavailable',
+        });
+        break;
+      }
+      case 'task.recovery.rollback': {
+        const task = tasks.find((item) => item.id === message.taskId);
+        if (!task) { send(socket, {type:'error', id:message.id, message:'task not found'}); break; }
+        if (['running','queued','paused','awaiting_approval'].includes(task.status)) {
+          send(socket, {type:'error', id:message.id, message:'任务仍在执行，必须先终止再恢复'}); break;
+        }
+        try {
+          await finalizeTaskRecovery(task, 'rollback', {assumeExclusive: message.assumeExclusive === true});
+          send(socket, {type:'task.list.result', id:message.id, tasks});
+        } catch (error) {
+          send(socket, {type:'error', id:message.id, message:error instanceof Error ? error.message : String(error)});
+        }
+        break;
+      }
       case 'healthcheck.getConfig': {
         send(socket, {type:'healthcheck.config', id:message.id, checks:healthChecks});
         break;
@@ -1904,6 +3121,21 @@ case 'journal.list': {
         }
         tasks = tasks.filter((t)=>t.id!==message.taskId); saveTasks();
         send(socket,{type:'task.list.result',id:message.id,tasks});
+        break;
+      }
+      case 'projects.sync': {
+        const list = Array.isArray((message as any).projects) ? (message as any).projects : [];
+        const normalized = list
+          .filter((p: any) => p && typeof p.path === 'string' && typeof p.id === 'string')
+          .map((p: any) => ({id: String(p.id), name: String(p.name || p.id), path: String(p.path)}))
+          .slice(0, 100);
+        try {
+          writeFileSync(join(dataDir, 'projects.json'), JSON.stringify(normalized, null, 2));
+          restartFileWatchers();
+          send(socket, {type: 'projects.sync.result', id: message.id, ok: true, count: normalized.length});
+        } catch (error) {
+          send(socket, {type: 'error', id: message.id, message: error instanceof Error ? error.message : String(error)});
+        }
         break;
       }
       case 'filewatch.getConfig': {
@@ -1957,6 +3189,12 @@ case 'journal.list': {
         const item = proactive.markInboxState(message.itemId, message.state);
         if (!item) send(socket, {type:'error', id:message.id, message:'未找到主动消息'});
         else { broadcast({type:'proactive.inbox.updated', item}); send(socket, {type:'proactive.list.result', id:message.id, items:proactive.list(50)}); }
+        break;
+      }
+      case 'memory.dream': {
+        const result = await runDreamingJob(true);
+        send(socket, {type: 'memory.stats.result', id: message.id, count: memory.count(), lastConsolidateAt: memory.getLastConsolidateAt()});
+        if (!result.ok) send(socket, {type: 'error', id: message.id, message: result.error || 'dream failed'});
         break;
       }
       case 'memory.consolidate': {
@@ -2015,6 +3253,11 @@ function applyConfig(next: RuntimeConfigure) {
   restartFileWatchers();
   void telegramPoll();
   void configurePlugins();
+  void reconcileRecoveryTransactions()
+    .catch((error) => console.error('[pattern-sidecar] recovery reconciliation failed', error))
+    .finally(() => {
+      for (const task of tasks) if (task.status === 'queued') enqueueComputerUseTask(task);
+    });
 }
 type ComputerAction = {type:'uiaInvoke'|'uiaSetValue'|'click'|'type'|'key'|'scroll'|'wait'|'done'|'fail'; ref?:string; automationId?:string; name?:string; value?:string; x?:number; y?:number; text?:string; key?:string; modifiers?:string[]; amount?:number; reason:string; tier?:number};
 function actionTier(action: ComputerAction): number {
@@ -2030,7 +3273,7 @@ async function decideComputerAction(task: TaskRecord, screenshotBase64: string, 
   const anthropic = provider.toLowerCase().includes('anthropic');
   const vision=config.executor?.vision!==false;
   const plan = task.plan?.filter((step) => step.enabled).map((step, index) => `${index + 1}. ${step.title}: ${step.detail}`).join('\n') || '(no explicit step list; infer the task from its details)';
-  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nOrdered automation steps (follow in order; do not skip or reorder):\n${plan}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
+  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nWorkspace: ${task.workspace || task.workflow?.workspace || '(none)'}\nOrdered automation steps (follow in order; do not skip or reorder):\n${plan}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. To open the Windows Start menu, return {"type":"key","key":"win","reason":"open Start menu"}. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
   const userContent:any=vision?[{type:'text',text:instruction},{type:'image',source:{type:'base64',media_type:'image/png',data:screenshotBase64}}]:instruction;
   const openAiContent:any=vision?[{type:'text',text:instruction},{type:'image_url',image_url:{url:`data:image/png;base64,${screenshotBase64}`}}]:instruction;
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions', base), anthropic ? {
@@ -2071,7 +3314,10 @@ sockets.on('connection', (socket) => {
       send(socket, {type: 'error', id: 'unknown', message: String(error)});
     }
   });
-  socket.on('close', () => clients.delete(socket));
+  socket.on('close', () => {
+    clients.delete(socket);
+    for (const active of activeChats.values()) if (active.socket === socket) active.controller.abort();
+  });
 });
 createInterface({input: process.stdin}).on('line', (line) => {
   try {
@@ -2101,7 +3347,10 @@ createInterface({input: process.stdin}).on('line', (line) => {
 // nightly consolidate + proactive + relay loops
 setInterval(() => {
   const d = new Date();
-  if (d.getHours() === 3 && d.getMinutes() < 2) memory.consolidate(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`);
+  if (d.getHours() === 3 && d.getMinutes() < 2) {
+    void runDreamingJob(false).then((result) => console.log('[pattern-sidecar] dreaming', result));
+    memory.consolidate(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`);
+  }
 }, 60_000);
 setInterval(() => {
   void proactiveTick();

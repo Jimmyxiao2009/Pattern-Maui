@@ -121,6 +121,11 @@ class RuntimeClient {
             this.pending.delete(id);
             pending.reject(new Error('Agent 运行时连接已断开'));
           }
+          for (const [id, handler] of this.chatHandlers) {
+            this.listeners.delete(handler);
+            this.chatHandlers.delete(id);
+            (handler as any).__disconnect?.();
+          }
           if (!this.intentionalClose) this.scheduleReconnect();
         };
         socket.onmessage = (event) => this.receive(JSON.parse(event.data) as ServerMessage);
@@ -171,8 +176,9 @@ class RuntimeClient {
     callbacks: {
       onDelta: (delta: string) => void;
       onDone: () => void;
+      onCancelled?: () => void;
       onError: (message: string) => void;
-      onEvent?: (event: {kind: string; text: string; ts?: number}) => void;
+      onEvent?: (event: {id?: string; kind: string; text: string; status?: string; action?: string; receipt?: string; ts?: number}) => void;
     },
   ) {
     if (!(await this.ensureConnected()) || !this.socket) throw new Error('Agent 运行时未连接');
@@ -187,16 +193,21 @@ class RuntimeClient {
         this.chatHandlers.delete(message.id);
         callbacks.onDone();
       }
+      if (msg.type === 'chat.cancelled') {
+        this.listeners.delete(handler);
+        this.chatHandlers.delete(message.id);
+        callbacks.onCancelled?.();
+      }
       if (msg.type === 'chat.error') {
         this.listeners.delete(handler);
         this.chatHandlers.delete(message.id);
         callbacks.onError(msg.message);
       }
     };
-    (handler as any).__abort = () => {
+    (handler as any).__disconnect = () => {
+      if (aborted) return;
       aborted = true;
-      this.listeners.delete(handler);
-      this.chatHandlers.delete(message.id);
+      callbacks.onError('Agent 运行时连接已断开');
     };
     this.listeners.add(handler);
     this.chatHandlers.set(message.id, handler);
@@ -204,8 +215,10 @@ class RuntimeClient {
   }
 
   abortChat(id: string) {
-    const handler = this.chatHandlers.get(id) as any;
-    if (handler?.__abort) handler.__abort();
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+    // Always request cancel on the wire; handler may already be gone if stream finished.
+    this.socket.send(JSON.stringify({type: 'chat.cancel', id} satisfies ClientMessage));
+    return this.chatHandlers.has(id);
   }
 }
 

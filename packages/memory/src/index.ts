@@ -1,4 +1,4 @@
-import {DatabaseSync} from 'node:sqlite';
+import Database from 'better-sqlite3';
 import {createHash, randomUUID} from 'node:crypto';
 import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
@@ -176,14 +176,14 @@ function vecFromBlob(blob: Buffer | Uint8Array | null): Float32Array | null {
 }
 
 export class MemoryEngine {
-  private db: DatabaseSync;
+  private db: Database.Database;
   private indexCache = '';
   private lastConsolidateAt: number | null = null;
   private embedFn: ((text: string) => Promise<Float32Array>) | null = null;
 
   constructor(private dataDir: string) {
     mkdirSync(dataDir, {recursive: true});
-    this.db = new DatabaseSync(join(dataDir, 'memory.db'));
+    this.db = new Database(join(dataDir, 'memory.db'));
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.migrate();
     this.refreshIndex();

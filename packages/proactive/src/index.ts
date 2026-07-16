@@ -26,7 +26,8 @@ const DEFAULT_CONFIG: ProactiveConfig = {
   paused: false,
   bedtimeHour: 23,
   dailyQuotaEnabled: true,
-  dailyQuota: 20,
+  // Keep autonomous nudges sparse; required reminders still bypass via force.
+  dailyQuota: 6,
 };
 
 function dayKey(d = new Date()) {
@@ -87,7 +88,7 @@ export class ProactiveEngine {
         ...raw,
         // Autonomous chains have a hard safety ceiling; legacy configs cannot disable it.
         dailyQuotaEnabled: true,
-        dailyQuota: Math.min(20, Math.max(1, Number(raw.dailyQuota) || DEFAULT_CONFIG.dailyQuota)),
+        dailyQuota: Math.min(8, Math.max(1, Number(raw.dailyQuota) || DEFAULT_CONFIG.dailyQuota)),
         bedtimeHour: raw.bedtimeHour ?? raw.bedtime_hour ?? DEFAULT_CONFIG.bedtimeHour,
       };
     } catch {
@@ -119,8 +120,7 @@ export class ProactiveEngine {
     try {
       const value = JSON.parse(readFileSync(this.chainsPath, 'utf8'));
       if (!Array.isArray(value)) return [];
-      return value.filter((item): item is ProactiveChain => !!item && typeof item.id === 'string' && typeof item.purpose === 'string')
-        .slice(-200)
+      const normalized = value.filter((item): item is ProactiveChain => !!item && typeof item.id === 'string' && typeof item.purpose === 'string')
         .map((item) => ({
           ...item,
           kind: item.kind === 'required_reminder' ? 'required_reminder' : 'autonomous',
@@ -131,7 +131,16 @@ export class ProactiveEngine {
           failureCount: Number(item.failureCount) || 0,
           createdAt: Number(item.createdAt) || Date.now(),
           updatedAt: Number(item.updatedAt) || Date.now(),
-        }));
+        }))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      // Keep live chains, but trim historical failed/completed noise so UI/data don't balloon.
+      const live = normalized.filter((item) => item.status === 'active' || item.status === 'running');
+      const history = normalized.filter((item) => item.status !== 'active' && item.status !== 'running').slice(0, 20);
+      const pruned = [...live, ...history].slice(0, 80);
+      if (pruned.length !== normalized.length) {
+        writeFileSync(this.chainsPath, JSON.stringify(pruned, null, 2));
+      }
+      return pruned;
     } catch { return []; }
   }
 
@@ -147,7 +156,10 @@ export class ProactiveEngine {
       sourceConversationId: input.sourceConversationId || null, recurrence: input.recurrence || null,
       consecutiveSilentRuns: 0, failureCount: 0, createdAt: now, updatedAt: now, lastRunAt: null,
     };
-    this.chains = [chain, ...this.chains.filter((item) => item.id !== chain.id)].slice(0, 200);
+    const next = [chain, ...this.chains.filter((item) => item.id !== chain.id)];
+    const live = next.filter((item) => item.status === 'active' || item.status === 'running');
+    const history = next.filter((item) => item.status !== 'active' && item.status !== 'running').slice(0, 20);
+    this.chains = [...live, ...history].slice(0, 80);
     this.saveChains();
     return chain;
   }
@@ -267,11 +279,12 @@ export class ProactiveEngine {
       }
     }
 
+    // One rest nudge per day. Hourly buckets previously spawned duplicate chains.
     if (input.idleSeconds < 60 && input.now - input.lastUserActivityAt > 50 * 60) {
       impulses.push({
         type: 'focus_break',
         score: 0.35,
-        topicKey: `focus_break:${dayKey()}:${Math.floor(input.now / 3600)}`,
+        topicKey: `focus_break:${dayKey()}`,
         reason: '连续活动较久，可考虑短暂休息',
         payload: {},
       });

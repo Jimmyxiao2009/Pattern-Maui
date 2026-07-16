@@ -20,6 +20,15 @@
     pending: '等待', running: '进行中', done: '完成', failed: '失败', skipped: '跳过', awaiting_approval: '待审批',
   };
 
+  async function focusTask(id: string) {
+    if (!(await runtime.connect())) return;
+    const res = await runtime.request<any>({type: 'task.list', id: crypto.randomUUID()});
+    const found = res.type === 'task.list.result' ? res.tasks.find((item: TaskItem) => item.id === id) : null;
+    if (!found) return;
+    task = found;
+    pendingStep = found.steps?.find((step: any) => step.status === 'awaiting_approval') || null;
+    screenshot = '';
+  }
 
   onMount(() => {
     void runtime.connect().then(async () => {
@@ -38,9 +47,13 @@
           null;
       }
     });
-    return runtime.on((message) => {
-      if (message.type === 'task.updated') task = message.task as TaskItem;
+    const unsubscribe = runtime.on((message) => {
+      if (message.type === 'task.updated' && (!task || task.id === message.task.id)) {
+        task = message.task as TaskItem;
+        if (message.task.status !== 'awaiting_approval') pendingStep = null;
+      }
       if (message.type === 'task.approval_required') {
+        if (task && task.id !== message.taskId) return;
         pendingStep = message.step as any;
         screenshot = message.screenshotBase64 ? `data:image/png;base64,${message.screenshotBase64}` : '';
         void runtime.request({type: 'task.list', id: crypto.randomUUID()}).then((res: any) => {
@@ -53,11 +66,24 @@
       }
       if (message.type === 'task.list.result' && !task) task = message.tasks[0] ?? null;
     });
+    const handleFocus = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (id) void focusTask(id);
+    };
+    window.addEventListener('pattern-focus-task', handleFocus);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('pattern-focus-task', handleFocus);
+    };
   });
 
   async function control(action: 'approve' | 'reject' | 'cancel' | 'pause' | 'resume') {
     if (!task) return;
-    await runtime.request({type: 'task.control', id: crypto.randomUUID(), taskId: task.id, action});
+    try {
+      await runtime.request({type: 'task.control', id: crypto.randomUUID(), taskId: task.id, action});
+    } catch {
+      return;
+    }
     if (action === 'approve' || action === 'reject') pendingStep = null;
     if (action === 'resume' && (window as any).__TAURI_INTERNALS__) {
       const {invoke} = await import('@tauri-apps/api/core');

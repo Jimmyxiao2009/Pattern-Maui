@@ -4,3 +4,6 @@ target/
 .svelte-kit/
 *.log
 .tools/
+sidecar/.tmp/
+apps/desktop/src-tauri/resources/agentos.exe
+apps/desktop/src-tauri/resources/agentos-integration.json

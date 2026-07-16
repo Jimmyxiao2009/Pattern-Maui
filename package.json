@@ -14,6 +14,8 @@
     "mobile:android:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1",
     "sidecar:build": "pnpm --dir sidecar build",
     "sidecar:binary": "pnpm --dir sidecar build:binary",
+    "agentos:bundle:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-agentos.ps1",
+    "desktop:build:windows": "pnpm agentos:bundle:windows && pnpm --dir apps/desktop tauri build --config src-tauri/tauri.agentos.windows.conf.json",
     "build:all": "pnpm sidecar:build && pnpm build",
     "test": "pnpm --dir sidecar test && pnpm check && pnpm mobile:check",
     "test:ui": "node tests/run-ui.mjs"

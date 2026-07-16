@@ -1,49 +1,57 @@
-/** Minimal markdown → safe HTML for assistant messages (no external deps). */
+/** Small, dependency-free Markdown renderer for chat output. All source text is escaped first. */
 export function renderMarkdown(source: string): string {
-  const escaped = escapeHtml(source || '');
-  const withCode = escaped.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
-    return `<pre class="md-code"><code>${code.replace(/\n$/, '')}</code></pre>`;
+  const codeBlocks: string[] = [];
+  const masked = (source || '').replace(/\x60{3}[^\n]*\n([\s\S]*?)\x60{3}/g, (_match, code: string) => {
+    const index = codeBlocks.push(code.replace(/\n$/, '')) - 1;
+    return '\n\u0000CODE' + index + '\u0000\n';
   });
-  const withInline = withCode.replace(/`([^`\n]+)`/g, '<code class="md-inline">$1</code>');
-  const lines = withInline.split('\n');
+  const lines = escapeHtml(masked).split('\n');
   const out: string[] = [];
-  let inList = false;
+  let list: 'ul' | 'ol' | null = null;
+
+  const closeList = () => {
+    if (!list) return;
+    out.push('</' + list + '>');
+    list = null;
+  };
+
   for (const line of lines) {
-    if (line.startsWith('<pre')) {
-      if (inList) {
-        out.push('</ul>');
-        inList = false;
-      }
-      out.push(line);
+    const code = line.match(/^\u0000CODE(\d+)\u0000$/);
+    if (code) {
+      closeList();
+      out.push('<pre class="md-code"><code>' + escapeHtml(codeBlocks[Number(code[1])] || '') + '</code></pre>');
       continue;
     }
     const bullet = line.match(/^[-*]\s+(.+)$/);
-    if (bullet) {
-      if (!inList) {
-        out.push('<ul class="md-list">');
-        inList = true;
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+    if (bullet || ordered) {
+      const next = bullet ? 'ul' : 'ol';
+      if (list !== next) {
+        closeList();
+        list = next;
+        out.push('<' + next + ' class="md-list">');
       }
-      out.push(`<li>${formatInline(bullet[1])}</li>`);
+      out.push('<li>' + formatInline((bullet || ordered)![1]) + '</li>');
       continue;
     }
-    if (inList) {
-      out.push('</ul>');
-      inList = false;
-    }
-    if (/^###\s+/.test(line)) out.push(`<h3 class="md-h">${formatInline(line.replace(/^###\s+/, ''))}</h3>`);
-    else if (/^##\s+/.test(line)) out.push(`<h2 class="md-h">${formatInline(line.replace(/^##\s+/, ''))}</h2>`);
-    else if (/^#\s+/.test(line)) out.push(`<h1 class="md-h">${formatInline(line.replace(/^#\s+/, ''))}</h1>`);
-    else if (line.trim() === '') out.push('<br/>');
-    else out.push(`<p class="md-p">${formatInline(line)}</p>`);
+    closeList();
+    if (/^###\s+/.test(line)) out.push('<h3 class="md-h">' + formatInline(line.replace(/^###\s+/, '')) + '</h3>');
+    else if (/^##\s+/.test(line)) out.push('<h2 class="md-h">' + formatInline(line.replace(/^##\s+/, '')) + '</h2>');
+    else if (/^#\s+/.test(line)) out.push('<h1 class="md-h">' + formatInline(line.replace(/^#\s+/, '')) + '</h1>');
+    else if (/^&gt;\s+/.test(line)) out.push('<blockquote class="md-quote">' + formatInline(line.replace(/^&gt;\s+/, '')) + '</blockquote>');
+    else if (!line.trim()) out.push('<br/>');
+    else out.push('<p class="md-p">' + formatInline(line) + '</p>');
   }
-  if (inList) out.push('</ul>');
+  closeList();
   return out.join('');
 }
 
 function formatInline(text: string): string {
   return text
+    .replace(/\x60([^\x60\n]+)\x60/g, '<code class="md-inline">$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
 
 function escapeHtml(text: string): string {
@@ -51,5 +59,6 @@ function escapeHtml(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

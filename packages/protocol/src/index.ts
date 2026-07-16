@@ -169,6 +169,9 @@ export interface TaskRecord {
   detail: string;
   status: 'scheduled' | 'queued' | 'running' | 'paused' | 'awaiting_approval' | 'cancelled' | 'done' | 'failed';
   createdAt: string;
+  conversationId?: string;
+  workspace?: string;
+  projectName?: string;
   steps?: TaskStep[];
   riskTier?: number;
   error?: string;
@@ -183,6 +186,12 @@ export interface TaskRecord {
   activeRunId?: string;
   workflow?: {id: string; name: string; stepCount: number; currentStep?: number; workspace?: string; agents?: number};
   agentResults?: Array<{skillId:string; output:string; status:'done'|'failed'; ts:number}>;
+  recovery?: {
+    transactionId?: string;
+    state: 'unavailable' | 'active' | 'prepared' | 'committed' | 'rolled_back' | 'conflicted' | 'recovery_required';
+    fileScopes: string[];
+    error?: string;
+  };
 }
 
 export interface TaskPlanStep {
@@ -312,6 +321,8 @@ export interface SecurityPolicy {
   workspaceRoot?: string | null;
   /** Enforce workspace root for MCP write / process tools when true. */
   enforceWorkspace: boolean;
+  /** On Windows, reject a mutating task with a declared workspace when AgentOS cannot protect it. */
+  requireRecoveryForWorkspaceWrites: boolean;
   /** Auto-approve tiers below this number (default 2 => T0/T1 auto). */
   autoApproveBelow: number;
   /** Hard-deny tiers at or above this number (default 3). */
@@ -338,12 +349,15 @@ export type ClientMessage =
       sessionId?: string;
       /** Preferred slot after local/frontend routing. Executor usually becomes a task. */
       slot?: AgentSlot;
+      /** When false, primary agent keeps the turn and may use tools itself instead of spawning sub-agents. */
+      allowSubAgents?: boolean;
       /** Absolute project root when the chat is project-scoped. */
       workspace?: string;
       projectName?: string;
       /** Optional file paths the user attached for this turn. */
       attachments?: string[];
     }
+  | { type: 'chat.cancel'; id: string }
   | { type: 'memory.list'; id: string; query?: string | null; category?: string | null }
   | { type: 'memory.add'; id: string; item: Partial<MemoryRecord> & { text: string; category: MemoryCategory | string } }
   | { type: 'memory.update'; id: string; memoryId: string; item: Partial<MemoryRecord> & { text?: string; category?: MemoryCategory | string; importance?: number } }
@@ -364,9 +378,10 @@ export type ClientMessage =
   | { type: 'relay.status'; id: string }
   | { type: 'relay.syncNow'; id: string }
   | { type: 'task.list'; id: string }
-  | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule; plan?: TaskPlanStep[] }
+  | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule; plan?: TaskPlanStep[]; conversationId?: string; workspace?: string; projectName?: string }
   | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule; plan?: TaskPlanStep[] }
   | { type: 'task.control'; id: string; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject' }
+  | { type: 'task.recovery.rollback'; id: string; taskId: string; assumeExclusive?: boolean }
   | { type: 'task.delete'; id: string; taskId: string }
   | { type: 'model.metrics.get'; id: string }
   | { type: 'model.catalog.get'; id: string }
@@ -382,6 +397,7 @@ export type ClientMessage =
   | { type: 'mcp.call'; id: string; serverId: string; tool: string; arguments?: Record<string, unknown> }
   | { type: 'workspace.worktree.create'; id: string; root: string; name?: string }
   | { type: 'workspace.diff'; id: string; root: string }
+  | { type: 'projects.sync'; id: string; projects: Array<{id: string; name: string; path: string}> }
   | { type: 'filewatch.getConfig'; id: string }
   | { type: 'filewatch.setConfig'; id: string; config: FileWatchConfig }
   | { type: 'filewatch.list'; id: string; limit?: number }
@@ -392,6 +408,7 @@ export type ClientMessage =
   | { type: 'journal.list'; id: string; limit?: number; query?: string | null }
   | { type: 'security.policy.get'; id: string }
   | { type: 'security.policy.set'; id: string; policy: Partial<SecurityPolicy> }
+  | { type: 'recovery.status'; id: string }
   | { type: 'runtime.ping'; id: string }
   | { type: 'runtime.foreground'; id: string };
 
@@ -402,8 +419,9 @@ export type ServerMessage =
   | { type: 'chat.started'; id: string; slot?: AgentSlot }
   | { type: 'chat.delta'; id: string; delta: string }
   | { type: 'chat.done'; id: string; slot?: AgentSlot }
+  | { type: 'chat.cancelled'; id: string }
   | { type: 'chat.error'; id: string; message: string }
-  | { type: 'chat.event'; id: string; event: {kind: string; text: string; ts?: number} }
+  | { type: 'chat.event'; id: string; event: {id?: string; kind: string; text: string; status?: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'awaiting_approval'; action?: string; receipt?: string; ts?: number} }
   | { type: 'memory.list.result'; id: string; items: MemoryRecord[] }
   | { type: 'memory.add.result'; id: string; item: MemoryRecord }
   | { type: 'memory.update.result'; id: string; item: MemoryRecord }
@@ -424,7 +442,7 @@ export type ServerMessage =
   | { type: 'cron.config'; id: string; triggers: CronTriggerConfig[] }
   | { type: 'proactive.impulse'; item: ProactiveLogItem }
   | { type: 'relay.status.result'; id: string; status: RelayStatus }
-  | { type: 'task.list.result'; id: string; tasks: TaskRecord[] }
+  | { type: 'task.list.result'; id: string; tasks: TaskRecord[]; createdTask?: TaskRecord }
   | { type: 'task.updated'; task: TaskRecord }
   | { type: 'task.approval_required'; taskId: string; step: TaskStep; screenshotBase64?: string }
   | { type: 'task.screenshot'; taskId: string; screenshotBase64: string; screenshotPath?: string }
@@ -439,10 +457,12 @@ export type ServerMessage =
   | { type: 'mcp.call.result'; id: string; serverId: string; tool: string; result: unknown }
   | { type: 'workspace.worktree.created'; id: string; path: string; branch: string }
   | { type: 'workspace.diff.result'; id: string; root: string; status: string; diff: string }
+  | { type: 'projects.sync.result'; id: string; ok: boolean; count: number }
   | { type: 'filewatch.config'; id: string; config: FileWatchConfig }
   | { type: 'filewatch.list.result'; id: string; items: FileWatchEvent[] }
   | { type: 'filewatch.event'; item: FileWatchEvent }
   | { type: 'journal.list.result'; id: string; items: AuditEntry[] }
   | { type: 'security.policy'; id: string; policy: SecurityPolicy }
+  | { type: 'recovery.status.result'; id: string; available: boolean; store?: string; transactionCount: number; openCount: number; error?: string }
   | { type: 'runtime.foreground.result'; id: string; title: string; busyHint?: boolean }
   | { type: 'error'; id: string; message: string };

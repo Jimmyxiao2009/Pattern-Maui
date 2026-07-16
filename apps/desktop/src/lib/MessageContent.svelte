@@ -15,12 +15,14 @@
 </script>
 
 {#if message.events?.length}
-  <ExecutionTimeline events={message.events} />
+  <ExecutionTimeline events={message.events} streaming={!!message.streaming} />
 {/if}
 
 {#if message.role === 'assistant'}
   {#if message.text}
     <div class="md-body">{@html html}</div>
+  {:else if message.streaming && !message.error}
+    <div class="typing" aria-label="正在生成"><i></i><i></i><i></i></div>
   {/if}
   {#if message.taskCard}
     <TaskCard card={message.taskCard} onOpen={onOpenTask} />
