@@ -120,6 +120,10 @@ public sealed class WindowsTrayService : IDisposable
     [DllImport("user32.dll")] private static extern IntPtr DefWindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint threadId, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern IntPtr LoadIcon(IntPtr instance, IntPtr icon);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern bool ShellNotifyIcon(uint message, ref NotifyIconData data);
+    // The exported Win32 symbol contains an underscore and a Unicode suffix;
+    // omitting EntryPoint makes .NET look for the non-existent
+    // `ShellNotifyIcon` symbol and crashes the app's tray thread at startup.
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "Shell_NotifyIconW")]
+    private static extern bool ShellNotifyIcon(uint message, ref NotifyIconData data);
 #endif
 }
