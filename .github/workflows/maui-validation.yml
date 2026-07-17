@@ -1,0 +1,59 @@
+name: Pattern MAUI validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sidecar:
+    name: Sidecar strict and tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm sidecar:typecheck
+      - run: pnpm sidecar:test
+
+  maui-windows:
+    name: MAUI Windows Debug
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet workload install maui-windows
+      - run: dotnet restore apps/maui/Pattern.Maui.csproj
+      - run: dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-windows10.0.19041.0 --no-restore -p:Configuration=Debug
+
+  maui-android:
+    name: MAUI Android Debug
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet workload install maui-android
+      - run: dotnet restore apps/maui/Pattern.Maui.csproj
+      - run: dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-android --no-restore -p:Configuration=Debug
+
+  maui-maccatalyst:
+    name: MAUI Mac Catalyst Debug
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet workload install maui-maccatalyst
+      - run: dotnet restore apps/maui/Pattern.Maui.csproj
+      - run: dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-maccatalyst --no-restore -p:Configuration=Debug

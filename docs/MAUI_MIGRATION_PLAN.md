@@ -77,6 +77,7 @@
 - `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
 - `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
 - `pnpm maui:mac:debug`：`net10.0-maccatalyst` Debug 编译通过；Catalyst 真机签名、通知权限和菜单交互仍需 macOS 主机验收。
+- `.github/workflows/maui-validation.yml`：在 Windows/macOS runner 上自动执行 sidecar strict/test、Windows/Android/Mac Catalyst Debug 构建；可在推送后完成 macOS 主机的最后验收。
 - Windows/macOS 运行时均使用 sidecar stdio；Windows 提供 tray、Ctrl+Alt+P 快捷聊天入口、单实例保护和本地恢复快照；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，并支持 `pattern://pair` 深链接配对，不要求用户访问 `127.0.0.1`。
 - 生成目录只用于本地构建，提交前执行仓库根目录的清理命令，归档目录 `archive/` 保持只读源码。
 
