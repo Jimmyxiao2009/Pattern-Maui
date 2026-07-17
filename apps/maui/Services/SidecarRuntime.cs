@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Pattern.Maui.Services;
 
@@ -22,6 +23,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
     private CancellationTokenSource? _runtimeCts;
     private Task? _receiveTask;
     private bool _intentionalStop;
+    private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _pending = [];
 
     public event Action<string>? StatusChanged;
     public event Action<string>? ChatDelta;
@@ -121,6 +123,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
 
     public async Task EnsureConnectedAsync(CancellationToken cancellationToken = default)
     {
+        if (OperatingSystem.IsAndroid()) throw new InvalidOperationException("Android 当前是中继模式，请先完成 WebDAV 设备配对。");
         if (IsConnected) return;
         Exception? last = null;
         for (var attempt = 0; attempt < 3; attempt++)
@@ -135,6 +138,25 @@ public sealed class SidecarRuntime : IAsyncDisposable
     {
         if (!IsConnected) return;
         await SendTextAsync(JsonSerializer.Serialize(new { type = "chat.cancel", id }), cancellationToken);
+    }
+
+    public async Task<JsonElement> RequestAsync(object request, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+        var node = JsonSerializer.SerializeToNode(request)?.AsObject() ?? throw new InvalidOperationException("请求为空。");
+        var id = node["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
+        node["id"] = id;
+        var waiter = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_stateLock) _pending[id] = waiter;
+        try
+        {
+            await SendTextAsync(node.ToJsonString(), cancellationToken);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            linked.CancelAfter(timeout ?? TimeSpan.FromSeconds(20));
+            using var registration = linked.Token.Register(() => waiter.TrySetCanceled(linked.Token));
+            return await waiter.Task;
+        }
+        finally { lock (_stateLock) _pending.Remove(id); }
     }
 
     public async Task ConfigureAsync(object configuration, CancellationToken cancellationToken = default)
@@ -240,6 +262,16 @@ public sealed class SidecarRuntime : IAsyncDisposable
     private void Dispatch(JsonElement message)
     {
         if (!message.TryGetProperty("type", out var type)) return;
+        if (message.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.String)
+        {
+            TaskCompletionSource<JsonElement>? waiter;
+            lock (_stateLock) _pending.TryGetValue(responseId.GetString()!, out waiter);
+            if (waiter is not null && !type.GetString()!.StartsWith("chat.", StringComparison.Ordinal))
+            {
+                waiter.TrySetResult(message.Clone());
+                return;
+            }
+        }
         switch (type.GetString())
         {
             case "chat.delta": ChatDelta?.Invoke(message.TryGetProperty("delta", out var delta) ? delta.GetString() ?? "" : ""); break;
@@ -348,6 +380,11 @@ public sealed class SidecarRuntime : IAsyncDisposable
         _runtimeCts?.Cancel();
         _runtimeCts?.Dispose();
         _runtimeCts = null;
+        lock (_stateLock)
+        {
+            foreach (var waiter in _pending.Values) waiter.TrySetException(new InvalidOperationException("运行时连接已断开。"));
+            _pending.Clear();
+        }
         if (_socket is { State: WebSocketState.Open } socket)
         {
             try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "shutdown", CancellationToken.None); } catch { }
