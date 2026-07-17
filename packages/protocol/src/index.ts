@@ -22,6 +22,7 @@ export interface ModelConnection {
   name?: string;
   provider: string;
   endpoint: string;
+  models?: string[];
   enabled?: boolean;
 }
 
@@ -262,6 +263,41 @@ export interface WorkflowDefinition {
   discussionRounds?: number;
 }
 
+/** Run-until-done goal (Grok Build /goal style), persisted in goals.json. */
+export interface GoalState {
+  id: string;
+  objective: string;
+  status: 'active' | 'paused' | 'done' | 'blocked' | 'cleared';
+  createdAt: number;
+  updatedAt: number;
+  taskId?: string;
+  conversationId?: string;
+  progress: string[];
+  blockedReason?: string;
+  /** When true, goal was created as plan-only (no heavy execution). */
+  planOnly?: boolean;
+}
+
+/** One checklist item in the current conversation's plan (Grok-style todos pane). */
+export type SessionPlanItemStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
+
+export interface SessionPlanItem {
+  id: string;
+  content: string;
+  status: SessionPlanItemStatus;
+}
+
+/**
+ * Session-scoped plan / todo list bound to a conversation — not a scheduled task.
+ * Lives in the chat UI for the active session (like Grok Build todos / Cursor plan checklist).
+ */
+export interface SessionPlan {
+  conversationId: string;
+  title?: string;
+  items: SessionPlanItem[];
+  updatedAt: number;
+}
+
 export interface McpServerConfig {
   id: string;
   name: string;
@@ -370,6 +406,7 @@ export type ClientMessage =
   | { type: 'proactive.inbox.mark'; id: string; itemId: string; state: 'read' | 'dismissed' | 'replied' }
   | { type: 'proactive.setPaused'; id: string; paused: boolean }
   | { type: 'proactive.getConfig'; id: string }
+  | { type: 'proactive.setConfig'; id: string; enabled?: boolean; paused?: boolean; bedtimeHour?: number }
   | { type: 'healthcheck.getConfig'; id: string }
   | { type: 'healthcheck.setConfig'; id: string; checks: HealthCheckConfig[] }
   | { type: 'cron.getConfig'; id: string }
@@ -380,7 +417,14 @@ export type ClientMessage =
   | { type: 'task.list'; id: string }
   | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule; plan?: TaskPlanStep[]; conversationId?: string; workspace?: string; projectName?: string }
   | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule; plan?: TaskPlanStep[] }
-  | { type: 'task.control'; id: string; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject' }
+  | { type: 'task.control'; id: string; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject' | 'run' }
+  | { type: 'goal.list'; id: string }
+  | { type: 'goal.set'; id: string; objective: string; conversationId?: string; workspace?: string; projectName?: string }
+  | { type: 'goal.control'; id: string; goalId: string; action: 'pause' | 'resume' | 'clear' | 'complete' }
+  | { type: 'goal.update'; id: string; goalId: string; progress?: string; status?: GoalState['status']; blockedReason?: string }
+  | { type: 'session_plan.get'; id: string; conversationId: string }
+  | { type: 'session_plan.set'; id: string; conversationId: string; title?: string; items: SessionPlanItem[]; merge?: boolean }
+  | { type: 'session_plan.clear'; id: string; conversationId: string }
   | { type: 'task.recovery.rollback'; id: string; taskId: string; assumeExclusive?: boolean }
   | { type: 'task.delete'; id: string; taskId: string }
   | { type: 'model.metrics.get'; id: string }
@@ -421,7 +465,7 @@ export type ServerMessage =
   | { type: 'chat.done'; id: string; slot?: AgentSlot }
   | { type: 'chat.cancelled'; id: string }
   | { type: 'chat.error'; id: string; message: string }
-  | { type: 'chat.event'; id: string; event: {id?: string; kind: string; text: string; status?: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'awaiting_approval'; action?: string; receipt?: string; ts?: number} }
+  | { type: 'chat.event'; id: string; event: {id?: string; kind: string; text: string; status?: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'awaiting_approval'; action?: string; receipt?: string; taskId?: string; ts?: number} }
   | { type: 'memory.list.result'; id: string; items: MemoryRecord[] }
   | { type: 'memory.add.result'; id: string; item: MemoryRecord }
   | { type: 'memory.update.result'; id: string; item: MemoryRecord }
@@ -452,6 +496,10 @@ export type ServerMessage =
   | { type: 'skill.updated'; id: string; skills: SkillDefinition[] }
   | { type: 'workflow.list.result'; id: string; workflows: WorkflowDefinition[] }
   | { type: 'workflow.started'; id: string; workflowId: string; taskId: string; workspace?: string }
+  | { type: 'goal.list.result'; id: string; goals: GoalState[] }
+  | { type: 'goal.updated'; id?: string; goal: GoalState; goals: GoalState[] }
+  | { type: 'session_plan.result'; id: string; plan: SessionPlan | null }
+  | { type: 'session_plan.updated'; plan: SessionPlan }
   | { type: 'mcp.list.result'; id: string; servers: McpServerConfig[] }
   | { type: 'mcp.updated'; id: string; servers: McpServerConfig[] }
   | { type: 'mcp.call.result'; id: string; serverId: string; tool: string; result: unknown }

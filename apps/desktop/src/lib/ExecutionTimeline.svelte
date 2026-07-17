@@ -63,7 +63,10 @@
     const needsAttention = resolved.some(
       (item) => item.status === 'failed' || item.status === 'awaiting_approval' || item.event.kind === 'error',
     );
-    const active = streaming && resolved.some((item) => item.status === 'running' || item.status === 'pending');
+    // Keep open for live tool/task steps even after chat streaming ends (computer-use continues via task.updated).
+    const active = resolved.some(
+      (item) => item.status === 'running' || item.status === 'pending' || item.status === 'awaiting_approval',
+    );
     if (needsAttention || active) open = true;
   });
 
@@ -76,6 +79,30 @@
       agent: 'Agent',
     };
     return map[kind] || kind;
+  }
+
+  function actionLabel(action?: string) {
+    if (!action) return '';
+    const map: Record<string, string> = {
+      key: '按键',
+      type: '输入',
+      click: '点击',
+      scroll: '滚动',
+      launch: '启动',
+      focus: '聚焦',
+      screenshot: '截屏',
+      foreground: '前台',
+      uiaInvoke: 'UIA 调用',
+      uiaSetValue: 'UIA 赋值',
+      wait: '等待',
+      done: '完成',
+      fail: '失败',
+      computer_use: 'Computer Use',
+      'desktop.computer_use': 'Computer Use',
+      'desktop.launch': '启动应用',
+      catalog: '工具目录',
+    };
+    return map[action] || action;
   }
 
   function statusLabel(status?: string) {
@@ -153,7 +180,7 @@
               </div>
               <p class="exec-timeline-text">
                 {#if event.action}
-                  <span class="exec-action">{event.action}</span>
+                  <span class="exec-action">{actionLabel(event.action)}</span>
                   <span class="exec-sep">·</span>
                 {/if}
                 {event.text}

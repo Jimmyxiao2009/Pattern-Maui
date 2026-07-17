@@ -7,3 +7,12 @@ target/
 sidecar/.tmp/
 apps/desktop/src-tauri/resources/agentos.exe
 apps/desktop/src-tauri/resources/agentos-integration.json
+
+apps/desktop/src-tauri/resources/pattern-runtime/
+apps/desktop/src-tauri/gen/
+.cargo-check-runtime/
+.reasonix/
+_*.ps1
+_*.py
+_*.err
+

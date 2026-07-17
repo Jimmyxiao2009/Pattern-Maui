@@ -1,6 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
-  import {Download,Plus,Save} from 'lucide-svelte';
+  import {Download,Plus,Save,X} from 'lucide-svelte';
   import PageHeader from './PageHeader.svelte';
   import SettingRow from './SettingRow.svelte';
   import Toggle from './Toggle.svelte';
@@ -71,12 +71,13 @@
   let watchEvents = $state<Array<{id:string;path:string;decision:string;reason:string;ts:number}>>([]);
   let quickShortcut = $state('alt-space');
   let activeQuickShortcut = $state('alt-space');
-  type ModelProfile = {id:string; name:string; provider:string; endpoint:string; model:string; executorProvider:string; executorEndpoint:string; executorModel:string; executorVision:boolean};
+  type ModelProfile = {id:string; name:string; provider:string; endpoint:string; model:string; models?:string[]; executorProvider:string; executorEndpoint:string; executorModel:string; executorVision:boolean};
   let profiles = $state<ModelProfile[]>([]);
   let activeProfileId = $state('default');
   let modelMetrics = $state<Array<{model:string;provider:string;inputTokens:number;outputTokens:number;cachedTokens:number;requests:number;contextWindow?:number;balance?:string;cost?:number;costCurrency?:string;lastRequest?:{inputTokens:number;outputTokens:number;cachedTokens:number;durationMs?:number;cost?:number;costCurrency?:string;at:number};updatedAt:number}>>([]);
   let availableModels = $state<string[]>(['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.4-nano']);
   let modelCatalogSource = $state<'provider' | 'preset'>('preset');
+  let modelDraft = $state('');
   const isDemo = new URLSearchParams(location.search).has('demo');
   const themes: Array<{id: Theme; label: string; detail: string}> = [
     {id: 'night', label: '夜幕', detail: '暖金暗色'},
@@ -132,17 +133,42 @@
   }
 
   function persistProfiles() { localStorage.setItem('pattern-model-profiles', JSON.stringify({activeProfileId, profiles})); }
-  function snapshotProfile(): ModelProfile { return {id:activeProfileId, name: profiles.find((item)=>item.id===activeProfileId)?.name || `${provider} · ${model}`, provider, endpoint, model, executorProvider, executorEndpoint, executorModel, executorVision}; }
+  function profileModels(profile: Pick<ModelProfile, 'model' | 'models'> | null | undefined): string[] {
+    return [...new Set([...(profile?.models || []), profile?.model].filter((item): item is string => !!item?.trim()))];
+  }
+  function inferProviderFromEndpoint(value: string): string | null {
+    const key = value.toLowerCase();
+    if (key.includes('deepseek')) return 'DeepSeek';
+    if (key.includes('anthropic')) return 'Anthropic Compatible';
+    if (key.includes('openrouter')) return 'OpenRouter';
+    if (key.includes('dashscope') || key.includes('aliyuncs') || key.includes('bailian')) return '阿里云百炼 / Qwen';
+    if (key.includes('bigmodel') || key.includes('zhipu')) return '智谱 AI';
+    return null;
+  }
+  function resolvedProvider(value: string, current: string): string {
+    const inferred = inferProviderFromEndpoint(value);
+    return inferred && ['OpenAI Compatible', 'OpenAI'].includes(current) ? inferred : current;
+  }
+  function snapshotProfile(): ModelProfile {
+    const current = profiles.find((item)=>item.id===activeProfileId);
+    return {id:activeProfileId, name: current?.name || `${provider} · ${model}`, provider:resolvedProvider(endpoint, provider), endpoint, model, models:profileModels({model, models:current?.models}), executorProvider, executorEndpoint, executorModel, executorVision};
+  }
   function syncActiveProfile() { const profile = snapshotProfile(); const index = profiles.findIndex((item)=>item.id===profile.id); profiles = index < 0 ? [...profiles, profile] : profiles.map((item, i)=>i===index ? profile : item); persistProfiles(); }
   async function activateProfile(id: string) {
     const profile = profiles.find((item)=>item.id===id); if (!profile) return;
-    activeProfileId = id; provider = profile.provider; endpoint = profile.endpoint; model = profile.model;
+    activeProfileId = id; provider = resolvedProvider(profile.endpoint, profile.provider); endpoint = profile.endpoint; model = profile.model || profile.models?.[0] || '';
+    modelDraft = '';
+    availableModels = presetForProvider(provider); modelCatalogSource = 'preset';
+    if (provider !== profile.provider) {
+      profiles = profiles.map((item) => item.id === id ? {...item, provider} : item);
+      persistProfiles();
+    }
     executorProvider = profile.executorProvider; executorEndpoint = profile.executorEndpoint; executorModel = profile.executorModel; executorVision = profile.executorVision;
     await saveModel(); saved = `已切换到 ${profile.name}`;
   }
   function addProfile() {
     syncActiveProfile(); const id = crypto.randomUUID(); activeProfileId = id;
-    profiles = [...profiles, {id, name:`新配置 ${profiles.length + 1}`, provider:'OpenAI Compatible', endpoint:'https://api.openai.com/v1', model:'gpt-4.1-mini', executorProvider:'OpenAI Compatible', executorEndpoint:'https://api.openai.com/v1', executorModel:'', executorVision:true}];
+    profiles = [...profiles, {id, name:`新配置 ${profiles.length + 1}`, provider:'OpenAI Compatible', endpoint:'https://api.openai.com/v1', model:'gpt-4.1-mini', models:['gpt-4.1-mini'], executorProvider:'OpenAI Compatible', executorEndpoint:'https://api.openai.com/v1', executorModel:'', executorVision:true}];
     void activateProfile(id);
   }
   function presetForProvider(value: string) {
@@ -153,7 +179,49 @@
     if(key.includes('智谱') || key.includes('zhipu')) return ['glm-5.1','glm-5v-turbo','glm-4.7'];
     return ['gpt-5.6','gpt-5.6-terra','gpt-5.6-luna','gpt-5.5','gpt-5.5-pro','gpt-5.4','gpt-5.4-pro','gpt-5.4-mini','gpt-5.4-nano'];
   }
-  function modelChoices(current = '') { return Array.from(new Set([current, ...availableModels].filter(Boolean))); }
+  function configuredModelValues() {
+    return Array.from(new Set(profiles.filter((profile) => profile.provider?.trim() && profile.endpoint?.trim()).flatMap((profile) => [...profileModels(profile), profile.executorModel]).filter((item): item is string => !!item?.trim())));
+  }
+  function modelChoices(current = '') {
+    const configured = configuredModelValues();
+    void current;
+    return configured;
+  }
+  function modelChoiceLabel(value: string) {
+    const providers = [...new Set(profiles.flatMap((profile) => profileModels(profile).includes(value) ? [resolvedProvider(profile.endpoint, profile.provider)] : profile.executorModel === value ? [profile.executorProvider || profile.provider] : []).filter(Boolean))];
+    return providers.length ? `${providers.join(' / ')} · ${value}` : value;
+  }
+  function addConfiguredModel(value = modelDraft) {
+    const next = value.trim();
+    const profile = profiles.find((item) => item.id === activeProfileId);
+    if (!next || !profile) return;
+    const models = [...new Set([...profileModels(profile), next])];
+    profiles = profiles.map((item) => item.id === activeProfileId ? {...item, provider:resolvedProvider(endpoint, provider), model: item.model || next, models} : item);
+    if (!model) model = next;
+    modelDraft = '';
+    persistProfiles();
+    saved = `已加入模型 ${next}`;
+  }
+  function removeConfiguredModel(value: string) {
+    const profile = profiles.find((item) => item.id === activeProfileId);
+    if (!profile) return;
+    const models = profileModels(profile).filter((item) => item !== value);
+    if (!models.length) { saved = '至少保留一个已配置模型'; return; }
+    const nextModel = model === value ? models[0] : model;
+    profiles = profiles.map((item) => item.id === activeProfileId ? {...item, model:nextModel, models} : item);
+    model = nextModel;
+    persistProfiles();
+    saved = `已移除模型 ${value}`;
+  }
+  function handleEndpointInput(value: string) {
+    endpoint = value;
+    const nextProvider = resolvedProvider(value, provider);
+    if (nextProvider !== provider) {
+      provider = nextProvider;
+      availableModels = presetForProvider(provider);
+      modelCatalogSource = 'preset';
+    }
+  }
   async function refreshModelCatalog() {
     availableModels = presetForProvider(provider); modelCatalogSource = 'preset';
     try {
@@ -165,7 +233,7 @@
   onMount(async () => {
     try {
       const directory = JSON.parse(localStorage.getItem('pattern-model-profiles') || '{}');
-      if (Array.isArray(directory.profiles)) profiles = directory.profiles;
+      if (Array.isArray(directory.profiles)) profiles = directory.profiles.map((item: ModelProfile) => ({...item, models: profileModels(item)}));
       if (typeof directory.activeProfileId === 'string') activeProfileId = directory.activeProfileId;
     } catch { /* profiles are optional local metadata */ }
     if ((window as any).__TAURI_INTERNALS__) {
@@ -174,7 +242,7 @@
         autostartEnabled = await isEnabled();
         autostartReady = true;
         const {invoke} = await import('@tauri-apps/api/core');
-        const config = await invoke<{provider: string; endpoint: string; model: string; profileId?: string; agentProvider?: string; agentEndpoint?: string; agentModel?: string; executorProvider?: string; executorEndpoint?: string; executorModel?: string; executorVision?:boolean; localEmbedding?: boolean;plaaUrl?:string} | null>('load_model_config');
+        const config = await invoke<{provider: string; endpoint: string; model: string; profileId?: string; connections?: Array<{id:string;name?:string;provider:string;endpoint:string;models?:string[]}>; agentProvider?: string; agentEndpoint?: string; agentModel?: string; executorProvider?: string; executorEndpoint?: string; executorModel?: string; executorVision?:boolean; localEmbedding?: boolean;plaaUrl?:string} | null>('load_model_config');
         if (config) {
           provider = config.provider;
           endpoint = config.endpoint;
@@ -186,15 +254,27 @@
           executorEndpoint = config.executorEndpoint || config.endpoint;
           executorModel = config.executorModel || '';
           executorVision = config.executorVision !== false;
+          provider = resolvedProvider(endpoint, provider);
+          availableModels = presetForProvider(provider);
+          modelCatalogSource = 'preset';
           localEmbedding = !!config.localEmbedding;
           plaaUrl = config.plaaUrl || '';
           if (!profiles.length) {
-            activeProfileId = config.profileId || 'default';
-            profiles = [{id:activeProfileId, name:`${config.provider} · ${config.model}`, provider:config.provider, endpoint:config.endpoint, model:config.model, executorProvider:config.executorProvider || config.provider, executorEndpoint:config.executorEndpoint || config.endpoint, executorModel:config.executorModel || '', executorVision:config.executorVision !== false}];
+            const configProvider = resolvedProvider(config.endpoint, config.provider);
+            activeProfileId = config.profileId || config.connections?.[0]?.id || 'default';
+            const savedConnections = (config.connections || []).filter((item) => item.provider?.trim() && item.endpoint?.trim());
+            profiles = savedConnections.length
+              ? savedConnections.map((connection) => {
+                  const connectionProvider = resolvedProvider(connection.endpoint, connection.provider);
+                  const models = [...new Set((connection.models || []).concat(connection.id === activeProfileId ? [config.model] : [] ).filter(Boolean))];
+                  return {id:connection.id, name:connection.name || `${connectionProvider} · ${models[0] || '模型服务'}`, provider:connectionProvider, endpoint:connection.endpoint, model:connection.id === activeProfileId ? config.model : models[0] || '', models, executorProvider:config.executorProvider || connectionProvider, executorEndpoint:config.executorEndpoint || connection.endpoint, executorModel:config.executorModel || '', executorVision:config.executorVision !== false};
+                })
+              : [{id:activeProfileId, name:`${configProvider} · ${config.model}`, provider:configProvider, endpoint:config.endpoint, model:config.model, models:[config.model], executorProvider:config.executorProvider || configProvider, executorEndpoint:config.executorEndpoint || config.endpoint, executorModel:config.executorModel || '', executorVision:config.executorVision !== false}];
+            if (!profiles.some((item) => item.id === activeProfileId)) activeProfileId = profiles[0]?.id || activeProfileId;
             persistProfiles();
           } else if (profiles.some((item)=>item.id===activeProfileId)) {
             const profile = profiles.find((item)=>item.id===activeProfileId)!;
-            provider=profile.provider; endpoint=profile.endpoint; model=profile.model; executorProvider=profile.executorProvider; executorEndpoint=profile.executorEndpoint; executorModel=profile.executorModel; executorVision=profile.executorVision;
+            provider=resolvedProvider(profile.endpoint, profile.provider); endpoint=profile.endpoint; model=profile.model || profile.models?.[0] || ''; executorProvider=profile.executorProvider; executorEndpoint=profile.executorEndpoint; executorModel=profile.executorModel; executorVision=profile.executorVision;
           }
         }
         const proactive = await invoke<{enabled: boolean; bedtimeHour: number; paused?: boolean}>('load_proactive_config');
@@ -288,6 +368,16 @@
       const {invoke} = await import('@tauri-apps/api/core');
       await invoke('save_proactive_config', {config: {enabled, bedtimeHour: hour, paused}});
     }
+    if (await runtime.connect()) {
+      await runtime.request({
+        type: 'proactive.setConfig',
+        id: crypto.randomUUID(),
+        enabled,
+        paused,
+        bedtimeHour: hour,
+      });
+    }
+    saved = '主动设置已保存';
   }
 
   async function saveHealthChecks() {
@@ -320,6 +410,7 @@
     }
     try {
       // Roles select a model from the active connection; credentials and endpoints are maintained once.
+      provider = resolvedProvider(endpoint, provider);
       agentProvider = provider;
       agentEndpoint = endpoint;
       executorProvider = provider;
@@ -327,7 +418,7 @@
       syncActiveProfile();
       const {invoke} = await import('@tauri-apps/api/core');
       await invoke('save_model_config', {
-        config: {provider, endpoint, model, profileId:activeProfileId, connections: profiles.map((item) => ({id:item.id, name:item.name, provider:item.provider, endpoint:item.endpoint, enabled:true})), agentProvider, agentEndpoint, agentModel, executorProvider, executorEndpoint, executorModel, executorVision, localEmbedding,plaaUrl},
+        config: {provider, endpoint, model, profileId:activeProfileId, connections: profiles.map((item) => ({id:item.id, name:item.name, provider:resolvedProvider(item.endpoint, item.provider), endpoint:item.endpoint, models:profileModels(item), enabled:true})), agentProvider, agentEndpoint, agentModel, executorProvider, executorEndpoint, executorModel, executorVision, localEmbedding,plaaUrl},
         apiKey: apiKey || null,
         executorApiKey: executorApiKey || null,
         agentApiKey: agentApiKey || null,
@@ -456,7 +547,7 @@ async function activatePersonaCard(card: Persona) {
   }
 </script>
 
-<section class="view">
+<section class="view settings-view">
   <PageHeader eyebrow="Pattern" title="设置" subtitle="控制人格、模型与常驻行为。" />
   <div class="settings-layout">
     <aside>
@@ -529,9 +620,9 @@ async function activatePersonaCard(card: Persona) {
           <h2>使用模型</h2>
           <p class="settings-note">这里维护“谁负责什么”，不用为主 Agent 和子代理重复填写地址、密钥。所有角色都从当前接入的模型列表中选择。</p>
           <div class="model-usage-list">
-            <div class="model-usage-row"><div><strong>默认模型</strong><small>用于新对话、主 Agent 和最终回复</small></div><select bind:value={model}>{#each modelChoices(model) as item}<option value={item}>{item}</option>{/each}</select></div>
-            <div class="model-usage-row"><div><strong>独立规划模型</strong><small>用于拆解、路由和需要低成本判断的步骤</small></div><select bind:value={agentModel}><option value="">使用默认模型</option>{#each modelChoices(agentModel) as item}<option value={item}>{item}</option>{/each}</select></div>
-            <div class="model-usage-row"><div><strong>子代理模型</strong><small>明确要求干活时使用；留空则自动复用默认模型</small></div><select bind:value={executorModel}><option value="">使用默认模型</option>{#each modelChoices(executorModel) as item}<option value={item}>{item}</option>{/each}</select></div>
+            <div class="model-usage-row"><div><strong>默认模型</strong><small>用于新对话、主 Agent 和最终回复</small></div><select bind:value={model}>{#each modelChoices(model) as item}<option value={item}>{modelChoiceLabel(item)}</option>{/each}</select></div>
+            <div class="model-usage-row"><div><strong>独立规划模型</strong><small>用于拆解、路由和需要低成本判断的步骤</small></div><select bind:value={agentModel}><option value="">使用默认模型</option>{#each modelChoices(agentModel) as item}<option value={item}>{modelChoiceLabel(item)}</option>{/each}</select></div>
+            <div class="model-usage-row"><div><strong>子代理模型</strong><small>明确要求干活时使用；留空则自动复用默认模型</small></div><select bind:value={executorModel}><option value="">使用默认模型</option>{#each modelChoices(executorModel) as item}<option value={item}>{modelChoiceLabel(item)}</option>{/each}</select></div>
             <SettingRow title="执行模型支持图像" desc="关闭后只向模型发送 UIA/AX 无障碍树和动作回执，不发送截图。"><Toggle checked={executorVision} label="执行模型支持图像" onChange={(value)=>executorVision=value}/></SettingRow>
           </div>
           <div class="model-use-actions"><button class="primary-button" onclick={saveModel}><Save size={14} />保存使用设置</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
@@ -546,7 +637,7 @@ async function activatePersonaCard(card: Persona) {
           <p class="settings-note">每个接入只填写一次地址和密钥；完成后到“使用”列表选择默认模型、规划模型和子代理模型。</p>
           <div class="model-profiles">
             {#each profiles as profile}
-              <button class:active={profile.id === activeProfileId} onclick={() => activateProfile(profile.id)}><strong>{profile.name}</strong><span>{profile.provider} · {profile.model}</span></button>
+              <button class:active={profile.id === activeProfileId} onclick={() => activateProfile(profile.id)}><strong>{profile.name}</strong><span>{resolvedProvider(profile.endpoint, profile.provider)} · {profileModels(profile).join(' · ') || '未配置模型'}</span></button>
             {/each}
             <button class="add-profile" onclick={addProfile}>＋ 添加模型服务</button>
           </div>
@@ -555,9 +646,18 @@ async function activatePersonaCard(card: Persona) {
           {/if}
           <div class="provider-card">
             <div class="provider-card-head"><div><strong>{provider}</strong><span>{apiKey ? '待保存的新密钥' : '密钥保存在系统凭据库'}</span></div><span class="badge" class:green={!!apiKey}>接入配置</span></div>
-            <div class="settings-form"><label>服务商<select bind:value={provider} onchange={() => { availableModels=presetForProvider(provider); modelCatalogSource='preset'; }}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label><label>API 地址<input bind:value={endpoint} /></label><label>更新 API Key<input type="password" bind:value={apiKey} placeholder="留空则保持现有密钥" /></label><div><button class="quiet-button" onclick={refreshModelCatalog}>刷新可用模型</button></div></div>
+            <div class="settings-form"><label>服务商<select bind:value={provider} onchange={() => { availableModels=presetForProvider(provider); modelCatalogSource='preset'; }}><option>OpenAI Compatible</option><option>OpenAI</option><option>Anthropic</option><option>Anthropic Compatible</option><option>OpenRouter</option><option>DeepSeek</option><option>阿里云百炼 / Qwen</option><option>智谱 AI</option></select></label><label>API 地址<input value={endpoint} oninput={(event) => handleEndpointInput((event.currentTarget as HTMLInputElement).value)} placeholder="Anthropic-compatible 示例：https://api.example.com/v1" /></label><label>更新 API Key<input type="password" bind:value={apiKey} placeholder="留空则保持现有密钥" /></label><div><button class="quiet-button" onclick={refreshModelCatalog}>刷新可用模型</button></div></div>
             <datalist id="available-models">{#each availableModels as item}<option value={item}></option>{/each}</datalist>
-            <div class="enabled-models"><small>{modelCatalogSource === 'provider' ? '已发现模型' : '内置候选模型'}</small>{#each availableModels.slice(0, 12) as item}<span>{item}</span>{/each}</div>
+            <div class="configured-models">
+              <small>已配置模型 · 快速切换器只显示这些</small>
+              <div class="configured-model-chips">
+                {#each profileModels(profiles.find((item) => item.id === activeProfileId)) as item (item)}
+                  <button type="button" class:active={item === model} onclick={() => { model = item; }}><span>{item}</span><X size={11} onclick={(event) => { event.stopPropagation(); removeConfiguredModel(item); }} /></button>
+                {:else}<em>还没有模型，请从下方添加</em>{/each}
+              </div>
+              <div class="model-add-row"><input bind:value={modelDraft} list="available-models" placeholder="输入模型名，例如 deepseek-chat" onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addConfiguredModel(); } }} /><button type="button" class="quiet-button" onclick={() => addConfiguredModel()}>添加模型</button></div>
+            </div>
+            <div class="enabled-models"><small>{modelCatalogSource === 'provider' ? '服务商返回的可添加模型' : `${resolvedProvider(endpoint, provider)} 可添加模型`}</small>{#each availableModels.slice(0, 12) as item}<button type="button" onclick={() => addConfiguredModel(item)}>{item}</button>{/each}</div>
             <button class="primary-button" onclick={saveModel}><Save size={14} />保存接入</button>{#if saved}<span class="save-result">{saved}</span>{/if}
           </div>
         {/if}
@@ -570,48 +670,31 @@ async function activatePersonaCard(card: Persona) {
         <p class="settings-note">可选挂载点。填写本地 PLAA 服务地址后，当前情感状态会加入主 Agent 上下文；留空完全禁用。</p>
         <div class="settings-form"><label>PLAA 服务地址<input bind:value={plaaUrl} placeholder="http://127.0.0.1:8765" /></label><button class="quiet-button" onclick={saveModel}><Save size={14}/>保存挂载点</button></div>
       {:else if tab === 'proactive'}
-        <h2>主动性</h2>
-        <SettingRow title="深夜主动提醒" desc="达到设定时间后，同话题当天最多一次">
-          <Toggle checked={proactiveEnabled} label="启用深夜主动提醒" onChange={(value) => saveProactive(value, bedtimeHour, proactivePaused)} />
+        <h2>去哪管理？</h2>
+        <p class="settings-note">
+          <b>AI 会不会主动找你</b> → 侧栏「主动」页。<br/>
+          <b>每天几点提醒 / 定时任务</b> → 在对话中用 `/remind` 或 `/loop` 创建并查看进度。<br/>
+          下面只保留开关快捷项与健康检查。
+        </p>
+        <SettingRow title="启用 AI 主动" desc="关闭后不新建 AI 关心链；系统提醒不受影响">
+          <Toggle checked={proactiveEnabled} label="启用 AI 主动" onChange={(value) => saveProactive(value, bedtimeHour, proactivePaused)} />
         </SettingRow>
-        <SettingRow title="暂停主动性" desc="托盘也可切换；暂停后不发起新的主动消息">
-          <Toggle checked={proactivePaused} label="暂停主动性" onChange={(value) => saveProactive(proactiveEnabled, bedtimeHour, value)} />
+        <SettingRow title="暂停 AI 主动" desc="托盘也可切换">
+          <Toggle checked={proactivePaused} label="暂停 AI 主动" onChange={(value) => saveProactive(proactiveEnabled, bedtimeHour, value)} />
         </SettingRow>
-        <SettingRow title="提醒时间" desc="本地时间到达该小时后触发">
+        <SettingRow title="安静时间" desc="之后 AI 更少打扰">
           <select class="compact-select" bind:value={bedtimeHour} onchange={() => saveProactive(proactiveEnabled, bedtimeHour, proactivePaused)}>
             {#each [21, 22, 23, 0, 1, 2] as hour}
               <option value={hour}>{String(hour).padStart(2, '0')}:00</option>
             {/each}
           </select>
         </SettingRow>
-        <SettingRow title="立即试一次" desc="唤醒一次 AI；AI 会通过工具决定是否发消息及是否安排下一次唤醒。">
-          <button class="quiet-button" onclick={async () => {
-            if (!(await runtime.connect())) return;
-            await runtime.request({type:'proactive.trigger', id: crypto.randomUUID(), kind:'manual', reason:'设置页手动触发'});
-            const res = await runtime.request({type:'proactive.list', id: crypto.randomUUID(), limit:30});
-            if ((res as any).type==='proactive.list.result') proactiveLog = (res as any).items;
-          }}>触发</button>
-        </SettingRow>
-        <h2>定时触发</h2>
-        <p class="settings-note">每行写「HH:MM | 提醒内容」。这是可靠的系统提醒：即使模型不可用也会送达，并在收件箱中明确标注为系统消息。</p>
-        <div class="settings-form">
-          <label>触发列表<textarea bind:value={cronTriggersText} rows="4" placeholder="09:30 | 该准备日会了\n23:30 | 今天就到这里吧"></textarea></label>
-          <div><button class="quiet-button" onclick={saveCronTriggers}><Save size={14}/>保存定时触发</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
-        </div>
         <h2>服务健康检查</h2>
-        <p class="settings-note">每分钟请求一次；仅在可用/不可用状态变化时主动提醒。每行写 URL，或「名称 | URL」。</p>
+        <p class="settings-note">每分钟请求一次；状态变化时主动提醒。每行 URL，或「名称 | URL」。</p>
         <div class="settings-form">
           <label>检查列表<textarea bind:value={healthChecksText} rows="4" placeholder="Production API | https://api.example.com/health"></textarea></label>
           <div><button class="quiet-button" onclick={saveHealthChecks}><Save size={14}/>保存健康检查</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
         </div>
-        <h2>TA 今天为什么找我</h2>
-        {#each proactiveLog as item}
-          <SettingRow title={item.type} desc={`${new Date(item.ts * 1000).toLocaleString('zh-CN')} · ${item.reason} · ${item.body}`}>
-            <span class="badge dim">日志</span>
-          </SettingRow>
-        {:else}
-          <p class="settings-note">还没有主动记录。</p>
-        {/each}
       {:else if tab === 'filewatch'}
         <h2>文件系统感知</h2>
         <p class="settings-note">只把路径和变化类型先发给 AI 判断；AI 认为有助于了解你时才读取文件。不监视未列出的目录。</p>
@@ -663,10 +746,10 @@ async function activatePersonaCard(card: Persona) {
             <input aria-label="工作区信任根" bind:value={workspaceRoot} placeholder="E:\path	o\project" />
           </label>
           <label>自动放行低于此等级（默认 2 = T0/T1 自动）
-            <input type="number" min="0" max="3" bind:value={autoApproveBelow} />
+            <input type="number" min="0" max="4" bind:value={autoApproveBelow} />
           </label>
           <label>硬拒绝不低于此等级（默认 3 = T3 直接拒绝并冻结）
-            <input type="number" min="1" max="3" bind:value={hardDenyAt} />
+            <input type="number" min="1" max="4" bind:value={hardDenyAt} />
           </label>
           <div><button class="primary-button" type="button" onclick={saveSecurityPolicy}><Save size={14}/>保存安全策略</button>{#if saved}<span class="save-result">{saved}</span>{/if}</div>
         </div>

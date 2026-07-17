@@ -113,7 +113,8 @@
         }
         proactiveArrival = null;
       }
-      if (allowSubAgents && shouldTransferToExecutor(value)) {
+      // Computer Use mode entry is not gated by the sub-agent toggle.
+      if (shouldTransferToExecutor(value)) {
         await transfer(value);
         busy = false;
         return;
@@ -125,7 +126,7 @@
       }
       const id = crypto.randomUUID();
       await runtime.chat(
-        {type: 'chat.send', id, text: value, history: quickHistory, sessionId: quickConversationId || id, slot: allowSubAgents && decision.slot === 'executor' ? 'executor' : 'companion' as const, allowSubAgents},
+        {type: 'chat.send', id, text: value, history: quickHistory, sessionId: quickConversationId || id, slot: decision.slot, allowSubAgents},
         {
           onDelta: (delta) => (answer += delta),
           onDone: () => {

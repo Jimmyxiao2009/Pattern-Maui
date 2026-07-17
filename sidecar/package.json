@@ -6,7 +6,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --external:@huggingface/transformers --external:better-sqlite3 --external:nodemailer --external:imapflow --external:mailparser --outfile=dist/index.cjs ",
     "build:binary": "bun build src/index.ts --compile --outfile=dist/pattern-sidecar",
-    "test": "pnpm build && node --test test/runtime.test.mjs test/memory.test.mjs test/relay.test.mjs test/channels.test.mjs test/computer-use-text.test.mjs test/e2e.test.mjs test/extract.test.mjs"
+    "test": "pnpm build && node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",

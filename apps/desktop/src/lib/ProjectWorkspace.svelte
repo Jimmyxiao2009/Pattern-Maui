@@ -3,6 +3,7 @@
   import StatusDot from './StatusDot.svelte';
   import FileTree from './FileTree.svelte';
   import MessageContent from './MessageContent.svelte';
+  import SessionAgentDocks from './SessionAgentDocks.svelte';
   import type {ChatMessage, Conversation, FileNode, Project} from './types';
 
   let {
@@ -34,6 +35,12 @@
     onCancelEdit,
     onKeydown,
     onAttach,
+    composerDragOver = false,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    attachedPaths = [],
+    onRemoveAttachment,
     onRefreshFiles,
     onOpenFile,
     onAttachPath,
@@ -41,6 +48,17 @@
     onInspectDiff,
     onCreateWorktree,
     onOpenTask,
+    sessionPlanCollapsed = false,
+    sessionGoalCollapsed = false,
+    sessionLoopCollapsed = false,
+    sessionRemindCollapsed = false,
+    onToggleSessionPlan,
+    onToggleSessionGoal,
+    onToggleSessionLoop,
+    onToggleSessionRemind,
+    onOpenGoals,
+    onOpenTasks,
+    onOpenProactive,
   }: {
     project: Project;
     conversations: Conversation[];
@@ -70,6 +88,23 @@
     onCancelEdit: () => void;
     onKeydown: (event: KeyboardEvent) => void;
     onAttach: (event: Event) => void;
+    composerDragOver?: boolean;
+    sessionPlanCollapsed?: boolean;
+    sessionGoalCollapsed?: boolean;
+    sessionLoopCollapsed?: boolean;
+    sessionRemindCollapsed?: boolean;
+    onToggleSessionPlan?: () => void;
+    onToggleSessionGoal?: () => void;
+    onToggleSessionLoop?: () => void;
+    onToggleSessionRemind?: () => void;
+    onOpenGoals?: () => void;
+    onOpenTasks?: () => void;
+    onOpenProactive?: () => void;
+    onDragOver?: (event: DragEvent) => void;
+    onDragLeave?: (event: DragEvent) => void;
+    onDrop?: (event: DragEvent) => void;
+    attachedPaths?: string[];
+    onRemoveAttachment?: (path: string) => void;
     onRefreshFiles: () => void;
     onOpenFile: (node: FileNode) => void;
     onAttachPath: (node: FileNode) => void;
@@ -146,6 +181,20 @@
         <pre>{projectDiff.diff || '无 Diff'}</pre>
       </div>
     {/if}
+    <SessionAgentDocks
+      conversationId={activeConversationId}
+      planCollapsed={sessionPlanCollapsed}
+      goalCollapsed={sessionGoalCollapsed}
+      loopCollapsed={sessionLoopCollapsed}
+      remindCollapsed={sessionRemindCollapsed}
+      onTogglePlan={() => onToggleSessionPlan?.()}
+      onToggleGoal={() => onToggleSessionGoal?.()}
+      onToggleLoop={() => onToggleSessionLoop?.()}
+      onToggleRemind={() => onToggleSessionRemind?.()}
+      onOpenGoals={() => onOpenGoals?.()}
+      onOpenTasks={() => onOpenTasks?.()}
+      onOpenProactive={() => onOpenProactive?.()}
+    />
     <div class="chat-stream" bind:this={stream}>
       <div class="day-divider"><span>{project.name}</span></div>
       {#each messages as message (message.id)}
@@ -176,15 +225,33 @@
     </div>
     <form
       class="composer"
+      class:drag-over={composerDragOver}
       onsubmit={(e) => {
         e.preventDefault();
         onSend();
       }}
+      ondragenter={(e) => onDragOver?.(e)}
+      ondragover={(e) => onDragOver?.(e)}
+      ondragleave={(e) => onDragLeave?.(e)}
+      ondrop={(e) => onDrop?.(e)}
     >
+      {#if composerDragOver}
+        <div class="composer-drop-hint" aria-hidden="true">松开以附加文件到对话</div>
+      {/if}
       {#if editingMessageId}
         <div class="composer-editing"><span>正在编辑较早的消息，发送后将从这里继续。</span><button type="button" onclick={onCancelEdit}>取消</button></div>
       {/if}
-      <textarea aria-label="项目消息" bind:value={draft} onkeydown={onKeydown} rows="2" placeholder={`在 ${project.name} 中和 ${personaName} 讨论……`}></textarea>
+      {#if attachedPaths?.length}
+        <div class="composer-attachments" aria-label="已附加路径">
+          {#each attachedPaths as path (path)}
+            <span class="composer-chip" title={path}>
+              {path.split(/[/\\]/).pop() || path}
+              <button type="button" aria-label={`移除 ${path}`} onclick={() => onRemoveAttachment?.(path)}>×</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
+      <textarea aria-label="项目消息" bind:value={draft} onkeydown={onKeydown} rows="2" placeholder={`在 ${project.name} 中和 ${personaName} 讨论……（可拖入文件）`}></textarea>
       <div class="composer-actions">
         <button
           type="button"

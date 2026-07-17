@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm -w sidecar:build && pnpm dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm -w sidecar:build && pnpm build",
+    "beforeBuildCommand": "pnpm -w sidecar:bundle:windows && pnpm -w sidecar:build && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -64,6 +64,11 @@
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/pattern-runtime",
+      "resources/agentos.exe",
+      "resources/agentos-integration.json"
     ],
     "windows": {
       "wix": {

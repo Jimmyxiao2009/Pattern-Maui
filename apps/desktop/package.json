@@ -15,9 +15,14 @@
     "@pattern/relay": "workspace:*",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "dompurify": "^3.4.12",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
     "lucide-svelte": "^0.468.0",
-    "qrcode": "^1.5.4",
+    "marked": "^18.0.6",
     "qr-scanner": "^1.4.2",
+    "qrcode": "^1.5.4",
     "svelte": "^5.16.0"
   },
   "devDependencies": {

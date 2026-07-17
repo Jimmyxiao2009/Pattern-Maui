@@ -178,7 +178,7 @@ class RuntimeClient {
       onDone: () => void;
       onCancelled?: () => void;
       onError: (message: string) => void;
-      onEvent?: (event: {id?: string; kind: string; text: string; status?: string; action?: string; receipt?: string; ts?: number}) => void;
+      onEvent?: (event: {id?: string; kind: string; text: string; status?: string; action?: string; receipt?: string; taskId?: string; ts?: number}) => void;
     },
   ) {
     if (!(await this.ensureConnected()) || !this.socket) throw new Error('Agent 运行时未连接');

@@ -1,64 +1,106 @@
-/** Small, dependency-free Markdown renderer for chat output. All source text is escaped first. */
+import createDOMPurify from 'dompurify';
+import hljs from 'highlight.js/lib/common';
+import katex from 'katex';
+import {marked, Renderer} from 'marked';
+
+const MATH_MARKER = '@@PATTERN_MATH_';
+
+const renderer = new Renderer();
+
+renderer.code = ({text, lang}) => {
+  const language = (lang || '').trim().split(/\s+/)[0]?.toLowerCase() || '';
+  const highlighted = language && hljs.getLanguage(language)
+    ? hljs.highlight(text, {language}).value
+    : text.trim() ? hljs.highlightAuto(text).value : '';
+  const languageClass = language ? ` class="language-${escapeAttribute(language)}"` : '';
+  return `<pre class="md-code"><code${languageClass}>${highlighted}</code></pre>\n`;
+};
+
+renderer.codespan = ({text}) => `<code class="md-inline">${escapeHtml(text)}</code>`;
+renderer.html = ({text}) => escapeHtml(text);
+
+/**
+ * Render assistant Markdown with GFM, safe links/images, syntax-highlighted
+ * fenced code, and KaTeX math. Math is protected before Markdown parsing so
+ * backslashes are not treated as Markdown escapes.
+ */
 export function renderMarkdown(source: string): string {
-  const codeBlocks: string[] = [];
-  const masked = (source || '').replace(/\x60{3}[^\n]*\n([\s\S]*?)\x60{3}/g, (_match, code: string) => {
-    const index = codeBlocks.push(code.replace(/\n$/, '')) - 1;
-    return '\n\u0000CODE' + index + '\u0000\n';
+  const text = String(source || '').replace(/\r\n/g, '\n');
+  if (!text) return '';
+
+  const formulas: Array<{expression: string; displayMode: boolean}> = [];
+  const protectedText = protectMath(text, formulas);
+  const parsed = marked.parse(protectedText, {
+    gfm: true,
+    breaks: true,
+    renderer,
+  }) as string;
+  const withMath = parsed.replace(/@@PATTERN_MATH_(\d+)@@/g, (_match, index: string) => {
+    const formula = formulas[Number(index)];
+    if (!formula) return '';
+    try {
+      return katex.renderToString(formula.expression, {
+        displayMode: formula.displayMode,
+        throwOnError: false,
+        strict: 'ignore',
+        output: 'htmlAndMathml',
+      });
+    } catch {
+      return `<code class="md-inline md-math-error">${escapeHtml(formula.expression)}</code>`;
+    }
   });
-  const lines = escapeHtml(masked).split('\n');
-  const out: string[] = [];
-  let list: 'ul' | 'ol' | null = null;
 
-  const closeList = () => {
-    if (!list) return;
-    out.push('</' + list + '>');
-    list = null;
-  };
-
-  for (const line of lines) {
-    const code = line.match(/^\u0000CODE(\d+)\u0000$/);
-    if (code) {
-      closeList();
-      out.push('<pre class="md-code"><code>' + escapeHtml(codeBlocks[Number(code[1])] || '') + '</code></pre>');
-      continue;
-    }
-    const bullet = line.match(/^[-*]\s+(.+)$/);
-    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
-    if (bullet || ordered) {
-      const next = bullet ? 'ul' : 'ol';
-      if (list !== next) {
-        closeList();
-        list = next;
-        out.push('<' + next + ' class="md-list">');
-      }
-      out.push('<li>' + formatInline((bullet || ordered)![1]) + '</li>');
-      continue;
-    }
-    closeList();
-    if (/^###\s+/.test(line)) out.push('<h3 class="md-h">' + formatInline(line.replace(/^###\s+/, '')) + '</h3>');
-    else if (/^##\s+/.test(line)) out.push('<h2 class="md-h">' + formatInline(line.replace(/^##\s+/, '')) + '</h2>');
-    else if (/^#\s+/.test(line)) out.push('<h1 class="md-h">' + formatInline(line.replace(/^#\s+/, '')) + '</h1>');
-    else if (/^&gt;\s+/.test(line)) out.push('<blockquote class="md-quote">' + formatInline(line.replace(/^&gt;\s+/, '')) + '</blockquote>');
-    else if (!line.trim()) out.push('<br/>');
-    else out.push('<p class="md-p">' + formatInline(line) + '</p>');
-  }
-  closeList();
-  return out.join('');
+  // Keep the existing chat typography classes while letting marked own the
+  // parsing. DOMPurify removes raw HTML/script URLs from model output.
+  const styled = withMath
+    .replace(/<p>/g, '<p class="md-p">')
+    .replace(/<h([1-6])>/g, '<h$1 class="md-h">')
+    .replace(/<ul(?: class="[^"]*")?>/g, '<ul class="md-list">')
+    .replace(/<ol(?: class="[^"]*")?>/g, '<ol class="md-list">')
+    .replace(/<blockquote>/g, '<blockquote class="md-quote">')
+    .replace(/<table>/g, '<table class="md-table">')
+    .replace(/<hr>/g, '<hr class="md-hr"/>')
+    .replace(/<img /g, '<img class="md-img" ')
+    .replace(/<ul class="md-list">(?=[\s\S]*?<input)/g, '<ul class="md-list md-task">');
+  const purifier = typeof window !== 'undefined' ? createDOMPurify(window) : null;
+  return purifier
+    ? purifier.sanitize(styled, {ADD_ATTR: ['target', 'rel']})
+    : styled;
 }
 
-function formatInline(text: string): string {
-  return text
-    .replace(/\x60([^\x60\n]+)\x60/g, '<code class="md-inline">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+function protectMath(source: string, formulas: Array<{expression: string; displayMode: boolean}>): string {
+  // Fenced code is opaque to math replacement. This prevents `$HOME` or
+  // LaTeX-looking strings inside code samples from being rendered as math.
+  const parts = source.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g);
+  return parts.map((part, index) => {
+    if (index % 2 === 1) return part;
+
+    const inlineCode: string[] = [];
+    let segment = part.replace(/`[^`\n]+`/g, (code) => {
+      const marker = `@@PATTERN_INLINE_${inlineCode.length}@@`;
+      inlineCode.push(code);
+      return marker;
+    });
+    segment = segment.replace(/\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)|\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (_match, displayBracket, inlineBracket, displayDollar, inlineDollar) => {
+      const expression = String(displayBracket ?? inlineBracket ?? displayDollar ?? inlineDollar ?? '').trim();
+      const displayMode = displayBracket !== undefined || displayDollar !== undefined;
+      const marker = `${MATH_MARKER}${formulas.length}@@`;
+      formulas.push({expression, displayMode});
+      return marker;
+    });
+    return segment.replace(/@@PATTERN_INLINE_(\d+)@@/g, (_match, item: string) => inlineCode[Number(item)] || '');
+  }).join('');
 }
 
 function escapeHtml(text: string): string {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function escapeAttribute(text: string): string {
+  return escapeHtml(text).replace(/`/g, '&#96;');
 }

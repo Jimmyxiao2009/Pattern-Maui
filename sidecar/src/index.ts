@@ -10,7 +10,7 @@ import {WebSocketServer, WebSocket} from 'ws';
 import {MemoryEngine, categoryLabel, ensureDataDir, localEmbed, type MemoryRecord} from '@pattern/memory';
 import {ProactiveEngine} from '@pattern/proactive';
 import {RelayClient, type RelayConfig} from '@pattern/relay';
-import {assessSafety, routeUserMessage, taskTitleFromText} from '@pattern/core';
+import {assessSafety, normalizeCompanionToolName, routeUserMessage, shouldTransferToExecutor, taskTitleFromText} from '@pattern/core';
 import {MAX_AGENT_COUNT} from '@pattern/protocol';
 import {TelegramChannel, ImapChannel, createSmtpChannel, channelMessage, discoverChannelPlugins, loadChannelPlugin, type Channel, type ChannelMessage} from '@pattern/channels';
 import type {
@@ -31,7 +31,24 @@ import type {
   WorkflowDefinition,
   McpServerConfig,
   ProactiveChain,
+  GoalState,
+  SessionPlan,
+  SessionPlanItem,
 } from '@pattern/protocol';
+import {
+  clearSessionPlan,
+  enrichWithMentions,
+  executeSlashCommand,
+  formatSessionPlan,
+  getSessionPlan,
+  loadCustomWorkflows,
+  loadGoals,
+  parseSlashCommand,
+  saveCustomWorkflows,
+  saveGoals,
+  setSessionPlan,
+  type SlashDeps,
+} from './slash-handlers';
 interface ChatRequest {
   type: 'chat.send';
   id: string;
@@ -112,6 +129,80 @@ const codingWorkflows: WorkflowDefinition[] = [
   {id:'mass-parallel-review', name:'大规模并行审查', description:'将同一目标分派给最多 384 个并行只读 Agent，适合大仓库扫描与多角度证据收集。', skillIds:['code-review','release-check'], mode:'parallel-read', maxAgents:MAX_AGENT_COUNT},
   {id:'peer-review', name:'平权 Agent 研讨', description:'多个 Agent 独立论证、交叉质询，再由主模型主持汇总共识与分歧。', skillIds:['code-review','release-check'], mode:'peer-discussion', maxAgents:3, discussionRounds:2},
 ];
+let customWorkflows: WorkflowDefinition[] = loadCustomWorkflows(dataDir);
+function allWorkflows(): WorkflowDefinition[] {
+  const builtinIds = new Set(codingWorkflows.map((w) => w.id));
+  return [...codingWorkflows, ...customWorkflows.filter((w) => !builtinIds.has(w.id))];
+}
+function persistCustomWorkflows(items: WorkflowDefinition[]) {
+  customWorkflows = items;
+  saveCustomWorkflows(dataDir, items);
+}
+function makeSlashDeps(ctx?: {conversationId?: string; workspace?: string; projectName?: string}): SlashDeps {
+  return {
+    dataDir,
+    allSkills,
+    codingSkills,
+    getCustomSkills: () => customSkills,
+    setCustomSkills: (skills) => { customSkills = skills; },
+    saveCustomSkills,
+    getWorkflows: allWorkflows,
+    setCustomWorkflows: (items) => { customWorkflows = items; },
+    saveCustomWorkflows: (items) => saveCustomWorkflows(dataDir, items),
+    getCronTriggers: () => cronTriggers,
+    setCronTriggers: (items) => { cronTriggers = items; },
+    saveCronTriggers,
+    getTasks: () => tasks,
+    createTaskFromText,
+    scheduleFromText,
+    setProactivePaused: (paused) => {
+      if (config) {
+        config.proactive = {...(config.proactive || {enabled: true, bedtimeHour: 23}), paused};
+      }
+    },
+    triggerProactive: async (reason) => {
+      try {
+        // Lightweight manual impulse via proactive engine path if available
+        const item = {
+          id: randomUUID(),
+          type: 'manual',
+          body: reason,
+          reason,
+          origin: 'system' as const,
+          state: 'unread',
+          ts: Math.floor(Date.now() / 1000),
+          delivered: true,
+        };
+        broadcast({type: 'proactive.impulse', item});
+        broadcast({type: 'proactive.inbox.updated', item});
+        return `已触发主动消息：${reason}`;
+      } catch (error) {
+        return `触发失败：${error instanceof Error ? error.message : String(error)}`;
+      }
+    },
+    onSessionPlanUpdated: (plan) => broadcast({type: 'session_plan.updated', plan}),
+    onSkillsUpdated: (skills) => broadcast({type: 'skill.updated', id: 'slash', skills}),
+    onCronUpdated: (triggers) => broadcast({type: 'cron.config', id: 'slash', triggers}),
+    onProactiveConfigUpdated: (paused) => {
+      if (config?.proactive) {
+        broadcast({
+          type: 'proactive.config',
+          id: 'slash',
+          enabled: config.proactive.enabled !== false,
+          paused,
+          bedtimeHour: config.proactive.bedtimeHour ?? 23,
+        });
+      }
+    },
+    onTaskChanged: (task) => {
+      saveTasks();
+      announceTask(task);
+    },
+    conversationId: ctx?.conversationId,
+    workspace: ctx?.workspace,
+    projectName: ctx?.projectName,
+  };
+}
 const execFileAsync = promisify(execFile);
 let mcpServers = loadMcpServers();
 
@@ -122,8 +213,9 @@ type CompanionTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  kind: 'desktop' | 'mcp';
+  kind: 'desktop' | 'mcp' | 'pattern';
 };
+const PATTERN_SERVER_ID = 'pattern';
 
 const DESKTOP_SERVER_ID = 'desktop';
 
@@ -259,7 +351,7 @@ function listDesktopTools(): CompanionTool[] {
       serverId: DESKTOP_SERVER_ID,
       serverName: 'OS Bridge',
       name: 'computer_use',
-      description: 'Enter computer-use mode: enqueue a multi-step desktop session with per-step screenshot + UIA tree + controller actions. Use for multi-step UI goals (e.g. open Calculator and compute 1+1). Prefer atomic launch/key for single short actions. arguments.goal required.',
+      description: 'REQUIRED entry point for Computer Use mode. After enter, the runtime runs a closed loop that each step auto-injects foreground + screenshot + UIA control tree and decides actions. Use for any multi-step UI goal (open app then operate, calculate, fill forms). Do NOT try to assemble multi-step UI with bare launch/foreground/accessibility_tree — enter this mode first. arguments.goal required.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -299,8 +391,274 @@ function listMcpCompanionTools(): CompanionTool[] {
     });
 }
 
+function listPatternTools(): CompanionTool[] {
+  const str = {type: 'string'};
+  const planItem = {
+    type: 'object',
+    properties: {
+      id: str,
+      content: str,
+      status: {type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled']},
+    },
+  };
+  /** Agent-callable tools mapped 1:1 onto slash commands for natural-language use. */
+  return [
+    // --- /goal ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_goal',
+      description: '创建 run-until-done 目标（/goal）。用户说「设定目标」「一直做到…完成」时调用。',
+      inputSchema: {type: 'object', properties: {objective: str, goal: str, text: str}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'update_goal',
+      description: '更新当前目标进度：追加 progress 文案、completed=true 标记完成、blocked_reason 标记阻塞。执行多步目标时持续调用。',
+      inputSchema: {
+        type: 'object',
+        properties: {message: str, completed: {type: 'boolean'}, blocked_reason: str, status: str},
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'control_goal',
+      description: '控制当前目标：pause / resume / clear / complete（对应 /goal pause|resume|clear）。',
+      inputSchema: {
+        type: 'object',
+        properties: {action: {type: 'string', enum: ['pause', 'resume', 'clear', 'complete', 'status']}},
+        required: ['action'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'get_goal',
+      description: '查看当前/全部目标状态（/goal status）。',
+      inputSchema: {type: 'object', properties: {all: {type: 'boolean'}}},
+      kind: 'pattern',
+    },
+    // --- /plan ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_plan',
+      description: '写入当前会话 plan 待办清单（/plan）。多步任务开始前拆步骤；会替换整份清单。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: str,
+          title: str,
+          items: {type: 'array', items: planItem},
+          steps: {type: 'array', items: str},
+        },
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'update_plan',
+      description: '更新会话 plan 待办：标记 in_progress/completed。多步执行中持续调用以刷新顶栏进度。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: str,
+          merge: {type: 'boolean', description: 'true=按 id 合并；false=整表替换'},
+          items: {type: 'array', items: {...planItem, required: ['content']}},
+        },
+        required: ['items'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'get_plan',
+      description: '读取当前会话 plan 待办（/plan status）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'clear_plan',
+      description: '清空当前会话 plan（/plan clear）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    // --- /skill ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_skill',
+      description: '创建可复用技能（/skill 名称|描述|提示词）。用户说「做一个技能」「保存为技能」时调用。',
+      inputSchema: {
+        type: 'object',
+        properties: {name: str, description: str, prompt: str, kind: str},
+        required: ['name', 'prompt'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'list_skills',
+      description: '列出已安装技能（/skill list）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'run_skill',
+      description: '按技能名运行一轮并创建任务（/skill run 名称 目标）。',
+      inputSchema: {
+        type: 'object',
+        properties: {name: str, skill: str, goal: str, body: str},
+        required: ['name'],
+      },
+      kind: 'pattern',
+    },
+    // --- /loop ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_loop',
+      description: '创建循环任务（/loop 30m …）。用户说「每隔…做一次」「定时巡检」时调用。',
+      inputSchema: {
+        type: 'object',
+        properties: {prompt: str, text: str, intervalMinutes: {type: 'number'}, interval: str},
+        required: ['prompt'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'list_loops',
+      description: '列出循环任务与每日提醒（/loop list）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'delete_loop',
+      description: '取消循环任务（/loop delete <id>）。',
+      inputSchema: {type: 'object', properties: {id: str, taskId: str}, required: ['id']},
+      kind: 'pattern',
+    },
+    // --- /task ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_task',
+      description: '创建桌面执行/Computer Use 任务（/task）。用户说「帮我做」「打开…并…」时创建任务。',
+      inputSchema: {type: 'object', properties: {title: str, detail: str, goal: str}, required: ['title']},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'list_tasks',
+      description: '列出最近任务（排队/执行/定时/完成）。',
+      inputSchema: {type: 'object', properties: {limit: {type: 'number'}}},
+      kind: 'pattern',
+    },
+    // --- /remind ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_reminder',
+      description: '创建每日 HH:MM 系统提醒（/remind）。用户说「每天 xx:xx 提醒我…」时调用。',
+      inputSchema: {
+        type: 'object',
+        properties: {time: str, message: str, text: str},
+        required: ['time', 'message'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'list_reminders',
+      description: '列出每日提醒（cron）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'delete_reminder',
+      description: '删除一条每日提醒（按 id 或时间+文案匹配）。',
+      inputSchema: {type: 'object', properties: {id: str, time: str, message: str}},
+      kind: 'pattern',
+    },
+    // --- /proactive ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'trigger_proactive',
+      description: '主动消息控制：action=trigger|pause|resume（/proactive）。用户说「暂停主动」「现在关心我一下」时调用。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {type: 'string', enum: ['trigger', 'pause', 'resume']},
+          reason: str,
+        },
+      },
+      kind: 'pattern',
+    },
+    // --- /workflow ---
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'create_workflow',
+      description: '用技能 id 组合创建工作流。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: str,
+          description: str,
+          skillIds: {type: 'array', items: str},
+          mode: {type: 'string', enum: ['serial', 'parallel-read', 'peer-discussion']},
+          maxAgents: {type: 'number'},
+        },
+        required: ['name', 'skillIds'],
+      },
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'list_workflows',
+      description: '列出工作流（/workflow list）。',
+      inputSchema: {type: 'object', properties: {}},
+      kind: 'pattern',
+    },
+    {
+      serverId: PATTERN_SERVER_ID,
+      serverName: 'Pattern Runtime',
+      name: 'run_workflow',
+      description: '按 id/名称运行工作流（/workflow run）。',
+      inputSchema: {
+        type: 'object',
+        properties: {workflowId: str, id: str, input: str, goal: str},
+        required: ['workflowId'],
+      },
+      kind: 'pattern',
+    },
+  ];
+}
+
 function listCompanionTools(): CompanionTool[] {
-  return [...listDesktopTools(), ...listMcpCompanionTools()];
+  return [...listPatternTools(), ...listDesktopTools(), ...listMcpCompanionTools()];
 }
 
 function companionToolCatalogText(tools: CompanionTool[]) {
@@ -314,9 +672,16 @@ function companionToolCatalogText(tools: CompanionTool[]) {
       '在工具可用之前，禁止假装已经打开应用、按键或调用 MCP。',
     ].join('\n');
   }
+  const pattern = tools.filter((t) => t.kind === 'pattern');
   const desktop = tools.filter((t) => t.kind === 'desktop');
   const mcp = tools.filter((t) => t.kind === 'mcp');
   const lines: string[] = [];
+  if (pattern.length) {
+    lines.push('Pattern runtime tools (serverId=\"pattern\") — natural language OR slash /goal /plan /skill /loop /task /remind /proactive /workflow:');
+    for (const tool of pattern) {
+      lines.push(`- serverId=pattern tool=${tool.name} — ${tool.description}`);
+    }
+  }
   if (desktop.length) {
     lines.push('Desktop tools (use serverId=\"desktop\" and tool short name only):');
     for (const tool of desktop) {
@@ -333,29 +698,417 @@ function companionToolCatalogText(tools: CompanionTool[]) {
   } else {
     lines.push('MCP tools: none enabled.');
   }
+  lines.push('Slash shortcuts: /goal /skill /loop /plan /task /remind /proactive /workflow /help — also @skill:name @workflow:id');
   return lines.join('\n');
 }
 
-function extractCompanionToolPlan(raw: string): {toolCalls: Array<{serverId?: string; tool: string; arguments?: Record<string, unknown>}>; final?: string} | null {
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
+type CompanionToolCall = {serverId?: string; tool: string; arguments?: Record<string, unknown>};
+type CompanionToolPlan = {toolCalls: CompanionToolCall[]; final?: string; content?: string};
+
+/** Strip markdown fences / think tags often emitted by DeepSeek and similar models. */
+function stripModelJsonWrappers(raw: string): string {
+  return String(raw || '')
+    .replace(/```(?:json|JSON)?\s*/g, '')
+    .replace(/```/g, '')
+    .replace(/<\/?think>/gi, '')
+    .trim();
+}
+
+function parseToolArguments(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== 'string' || !raw.trim()) return {};
   try {
-    const parsed = JSON.parse(match[0]);
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (!Array.isArray((parsed as any).toolCalls) || !(parsed as any).toolCalls.length) return null;
-    return parsed as any;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {value: parsed};
   } catch {
-    return null;
+    return {raw};
   }
 }
 
-/** Models often copy catalog labels like desktop:launch / desktop.launch into the tool field. */
-function normalizeCompanionToolName(tool: string): string {
-  return String(tool || '')
-    .trim()
-    .replace(/^desktop[.:]/i, '')
-    .replace(/^os\s*bridge[.:]/i, '')
-    .trim();
+function splitToolFunctionName(name: string): {serverId?: string; tool: string} {
+  const cleaned = normalizeCompanionToolName(name);
+  // desktop__launch or mcpServer__tool_name
+  const dbl = cleaned.match(/^([a-z0-9_-]+)__(.+)$/i);
+  if (dbl) return {serverId: dbl[1] === 'desktop' ? DESKTOP_SERVER_ID : dbl[1], tool: dbl[2]};
+  const single = cleaned.match(/^(desktop|osbridge)[.:/](.+)$/i);
+  if (single) return {serverId: DESKTOP_SERVER_ID, tool: single[2]};
+  return {tool: cleaned};
+}
+
+function toolCallsFromOpenAiMessage(message: any): CompanionToolCall[] {
+  const calls = message?.tool_calls || message?.toolCalls;
+  if (!Array.isArray(calls) || !calls.length) return [];
+  return calls.slice(0, 4).map((call: any) => {
+    const fn = call?.function || call;
+    const name = String(fn?.name || call?.name || '');
+    const {serverId, tool} = splitToolFunctionName(name);
+    return {
+      serverId: call?.serverId || serverId,
+      tool,
+      arguments: parseToolArguments(fn?.arguments ?? call?.arguments ?? call?.args),
+    };
+  }).filter((call: CompanionToolCall) => !!call.tool);
+}
+
+/**
+ * Extract a tool plan from free-form model text (JSON protocol).
+ * Handles DeepSeek fences, nested braces, and alternate keys (tools / tool_call).
+ */
+function extractCompanionToolPlan(raw: string): CompanionToolPlan | null {
+  const text = stripModelJsonWrappers(raw);
+  if (!text) return null;
+  // Prefer fenced or whole-object JSON containing toolCalls
+  const candidates: string[] = [];
+  const objectMatch = text.match(/\{[\s\S]*\}/);
+  if (objectMatch) candidates.push(objectMatch[0]);
+  // Also try each balanced-ish JSON object substring starting at toolCalls
+  const idx = text.search(/"toolCalls"\s*:|"tools"\s*:|"tool_calls"\s*:/);
+  if (idx >= 0) {
+    const from = text.lastIndexOf('{', idx);
+    if (from >= 0) candidates.push(text.slice(from));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== 'object') continue;
+      const list = (parsed as any).toolCalls || (parsed as any).tools || (parsed as any).tool_calls;
+      if (!Array.isArray(list) || !list.length) continue;
+      const toolCalls: CompanionToolCall[] = list.slice(0, 4).map((call: any) => {
+        if (typeof call === 'string') {
+          const split = splitToolFunctionName(call);
+          return {serverId: split.serverId, tool: split.tool, arguments: {}};
+        }
+        const name = String(call.tool || call.name || call.function?.name || '');
+        const split = splitToolFunctionName(name);
+        return {
+          serverId: call.serverId || call.server || split.serverId,
+          tool: split.tool || name,
+          arguments: parseToolArguments(call.arguments ?? call.args ?? call.parameters ?? call.function?.arguments),
+        };
+      }).filter((call: CompanionToolCall) => !!call.tool);
+      if (!toolCalls.length) continue;
+      return {
+        toolCalls,
+        final: typeof (parsed as any).final === 'string' ? (parsed as any).final : undefined,
+        content: typeof (parsed as any).content === 'string' ? (parsed as any).content : undefined,
+      };
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return null;
+}
+
+function companionToolsAsOpenAi(tools: CompanionTool[]) {
+  return tools.slice(0, 40).map((tool) => ({
+    type: 'function' as const,
+    function: {
+      name: tool.kind === 'desktop'
+        ? `desktop__${tool.name}`
+        : tool.kind === 'pattern'
+          ? `pattern__${tool.name}`
+          : `${tool.serverId}__${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64),
+      description: tool.description.slice(0, 500),
+      parameters: tool.inputSchema && typeof tool.inputSchema === 'object'
+        ? tool.inputSchema
+        : {type: 'object', properties: {}},
+    },
+  }));
+}
+
+async function executePatternTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  ctx?: {conversationId?: string; workspace?: string; projectName?: string},
+): Promise<unknown> {
+  const name = normalizeCompanionToolName(toolName).replace(/^pattern_/, '').replace(/^pattern\./, '');
+  const deps = makeSlashDeps(ctx);
+  switch (name) {
+    // ── skill ──
+    case 'create_skill': {
+      const skillName = String(args.name || '').trim();
+      const prompt = String(args.prompt || args.body || '').trim();
+      if (!skillName || !prompt) throw new Error('create_skill requires name and prompt');
+      const message = await executeSlashCommand({
+        kind: 'skill',
+        action: 'create',
+        name: skillName,
+        body: `${String(args.description || skillName)}\n\n${prompt}`,
+      }, deps);
+      return {ok: true, message, skills: allSkills()};
+    }
+    case 'list_skills': {
+      const skills = allSkills();
+      return {
+        ok: true,
+        skills: skills.map((s) => ({id: s.id, name: s.name, description: s.description, kind: s.kind})),
+        message: await executeSlashCommand({kind: 'skill', action: 'list'}, deps),
+      };
+    }
+    case 'run_skill': {
+      const skillName = String(args.name || args.skill || '').trim();
+      if (!skillName) throw new Error('run_skill requires name');
+      return {
+        ok: true,
+        message: await executeSlashCommand({
+          kind: 'skill',
+          action: 'run',
+          name: skillName,
+          body: String(args.goal || args.body || args.detail || '').trim() || undefined,
+        }, deps),
+      };
+    }
+    // ── task ──
+    case 'create_task': {
+      const title = String(args.title || args.goal || '').trim();
+      if (!title) throw new Error('create_task requires title');
+      const detail = String(args.detail || title);
+      return {
+        ok: true,
+        message: await executeSlashCommand({kind: 'task', text: detail}, deps),
+      };
+    }
+    case 'list_tasks': {
+      const limit = Math.max(1, Math.min(50, Number(args.limit) || 20));
+      const items = tasks.slice(0, limit).map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        schedule: t.schedule,
+        nextRunAt: t.nextRunAt,
+        createdAt: t.createdAt,
+      }));
+      return {ok: true, tasks: items, count: tasks.length};
+    }
+    // ── goal ──
+    case 'create_goal': {
+      const objective = String(args.objective || args.goal || args.text || '').trim();
+      if (!objective) throw new Error('create_goal requires objective');
+      const message = await executeSlashCommand({kind: 'goal', action: 'set', text: objective}, deps);
+      const goals = loadGoals(dataDir);
+      const goal = goals.find((g: GoalState) => g.status === 'active') || goals[0];
+      if (goal) broadcast({type: 'goal.updated', goal, goals});
+      return {ok: true, message, goal};
+    }
+    case 'update_goal': {
+      const goals = loadGoals(dataDir);
+      const current = goals.find((g) => g.status === 'active' || g.status === 'paused' || g.status === 'blocked');
+      if (!current) return {ok: false, message: 'no active goal'};
+      if (args.message) current.progress = [...(current.progress || []), String(args.message)].slice(-20);
+      if (args.completed === true || args.status === 'done' || args.status === 'complete') current.status = 'done';
+      if (args.status === 'paused') current.status = 'paused';
+      if (args.status === 'active') current.status = 'active';
+      if (args.blocked_reason) {
+        current.status = 'blocked';
+        current.blockedReason = String(args.blocked_reason);
+      }
+      current.updatedAt = Date.now();
+      saveGoals(dataDir, goals);
+      broadcast({type: 'goal.updated', goal: current, goals});
+      return {ok: true, goal: current};
+    }
+    case 'control_goal': {
+      const action = String(args.action || 'status').toLowerCase();
+      if (action === 'status') {
+        return {
+          ok: true,
+          message: await executeSlashCommand({kind: 'goal', action: 'status'}, deps),
+          goals: loadGoals(dataDir),
+        };
+      }
+      const mapped = (['pause', 'resume', 'clear', 'complete'].includes(action) ? action : '') as
+        | 'pause' | 'resume' | 'clear' | 'complete' | '';
+      if (!mapped) throw new Error('control_goal action must be pause|resume|clear|complete|status');
+      if (mapped === 'complete') {
+        // slash goal has no complete action — use update path
+        const goals = loadGoals(dataDir);
+        const current = goals.find((g) => g.status === 'active' || g.status === 'paused' || g.status === 'blocked');
+        if (!current) return {ok: false, message: 'no active goal'};
+        current.status = 'done';
+        current.progress = [...(current.progress || []), `已标记完成 · ${new Date().toLocaleString('zh-CN')}`].slice(-20);
+        current.updatedAt = Date.now();
+        saveGoals(dataDir, goals);
+        broadcast({type: 'goal.updated', goal: current, goals});
+        return {ok: true, goal: current, message: `已完成目标：${current.objective}`};
+      }
+      const message = await executeSlashCommand({kind: 'goal', action: mapped}, deps);
+      const goals = loadGoals(dataDir);
+      const goal = goals.find((g) => g.status === 'active' || g.status === 'paused' || g.status === 'blocked' || g.status === 'cleared' || g.status === 'done');
+      if (goal) broadcast({type: 'goal.updated', goal, goals});
+      return {ok: true, message, goals};
+    }
+    case 'get_goal': {
+      const goals = loadGoals(dataDir);
+      if (args.all) return {ok: true, goals};
+      const current = goals.find((g) => g.status === 'active' || g.status === 'paused' || g.status === 'blocked') || null;
+      return {
+        ok: true,
+        goal: current,
+        message: await executeSlashCommand({kind: 'goal', action: 'status'}, deps),
+      };
+    }
+    // ── loop ──
+    case 'create_loop': {
+      const prompt = String(args.prompt || args.text || '').trim();
+      if (!prompt) throw new Error('create_loop requires prompt');
+      let interval = String(args.interval || '').trim();
+      if (!interval) {
+        const minutes = Number(args.intervalMinutes || args.minutes || 60);
+        interval = `${Math.max(1, minutes)}m`;
+      }
+      return {
+        ok: true,
+        message: await executeSlashCommand({kind: 'loop', action: 'create', interval, prompt}, deps),
+      };
+    }
+    case 'list_loops': {
+      return {
+        ok: true,
+        message: await executeSlashCommand({kind: 'loop', action: 'list'}, deps),
+        loops: tasks
+          .filter((t) => t.schedule?.kind === 'interval' && t.schedule.enabled !== false)
+          .map((t) => ({id: t.id, title: t.title, intervalMinutes: t.schedule?.intervalMinutes, status: t.status})),
+        reminders: cronTriggers.filter((c) => c.enabled),
+      };
+    }
+    case 'delete_loop': {
+      const id = String(args.id || args.taskId || '').trim();
+      if (!id) throw new Error('delete_loop requires id');
+      return {
+        ok: true,
+        message: await executeSlashCommand({kind: 'loop', action: 'delete', id}, deps),
+      };
+    }
+    // ── reminder ──
+    case 'create_reminder': {
+      const time = String(args.time || '').trim();
+      const message = String(args.message || args.text || '').trim();
+      if (!time || !message) throw new Error('create_reminder requires time and message');
+      return {ok: true, message: await executeSlashCommand({kind: 'remind', time, message}, deps)};
+    }
+    case 'list_reminders': {
+      return {ok: true, triggers: cronTriggers, message: await executeSlashCommand({kind: 'loop', action: 'list'}, deps)};
+    }
+    case 'delete_reminder': {
+      const id = String(args.id || '').trim();
+      const time = String(args.time || '').trim();
+      const message = String(args.message || '').trim();
+      if (!id && !time && !message) throw new Error('delete_reminder requires id or time/message');
+      const before = cronTriggers.length;
+      cronTriggers = cronTriggers.filter((t) => {
+        if (id) return t.id !== id && !t.id.startsWith(id);
+        const matchTime = time ? t.time === time : true;
+        const matchMsg = message ? t.message.includes(message) : true;
+        return !(matchTime && matchMsg);
+      });
+      saveCronTriggers();
+      broadcast({type: 'cron.config', id: 'pattern', triggers: cronTriggers});
+      return {
+        ok: true,
+        triggers: cronTriggers,
+        removed: before - cronTriggers.length,
+        message: before === cronTriggers.length ? '未匹配到提醒' : `已删除 ${before - cronTriggers.length} 条提醒`,
+      };
+    }
+    // ── workflow ──
+    case 'create_workflow': {
+      const wfName = String(args.name || '').trim();
+      const skillIds = Array.isArray(args.skillIds) ? args.skillIds.map(String) : String(args.skillIds || '').split(/[,\s]+/).filter(Boolean);
+      if (!wfName || !skillIds.length) throw new Error('create_workflow requires name and skillIds');
+      const wf: WorkflowDefinition = {
+        id: wfName.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, '-').slice(0, 48) || randomUUID().slice(0, 8),
+        name: wfName.slice(0, 80),
+        description: String(args.description || wfName).slice(0, 400),
+        skillIds: skillIds.slice(0, 20),
+        mode: (['serial', 'parallel-read', 'peer-discussion'].includes(String(args.mode))
+          ? String(args.mode)
+          : 'serial') as WorkflowDefinition['mode'],
+        maxAgents: Math.max(1, Math.min(32, Number(args.maxAgents) || skillIds.length || 1)),
+      };
+      const next = [wf, ...customWorkflows.filter((item) => item.id !== wf.id)].slice(0, 50);
+      persistCustomWorkflows(next);
+      return {ok: true, workflow: wf, workflows: allWorkflows()};
+    }
+    case 'list_workflows': {
+      const workflows = allWorkflows();
+      return {
+        ok: true,
+        workflows,
+        message: await executeSlashCommand({kind: 'workflow', action: 'list'}, deps),
+      };
+    }
+    case 'run_workflow': {
+      const workflowId = String(args.workflowId || args.id || '').trim();
+      const input = String(args.input || args.goal || '').trim();
+      if (!workflowId) throw new Error('run_workflow requires workflowId');
+      return {
+        ok: true,
+        message: await executeSlashCommand({kind: 'workflow', action: 'run', id: workflowId, input: input || undefined}, deps),
+      };
+    }
+    // ── proactive ──
+    case 'trigger_proactive': {
+      const action = String(args.action || 'trigger').toLowerCase();
+      if (action === 'pause') return {ok: true, message: await executeSlashCommand({kind: 'proactive', action: 'pause'}, deps)};
+      if (action === 'resume') return {ok: true, message: await executeSlashCommand({kind: 'proactive', action: 'resume'}, deps)};
+      return {
+        ok: true,
+        message: await executeSlashCommand({
+          kind: 'proactive',
+          action: 'trigger',
+          reason: String(args.reason || '自然语言触发'),
+        }, deps),
+      };
+    }
+    // ── plan ──
+    case 'get_plan': {
+      const conversationId = String(ctx?.conversationId || deps.conversationId || '').trim();
+      if (!conversationId) return {ok: true, plan: null, message: '无会话，尚无 plan'};
+      const plan = getSessionPlan(dataDir, conversationId);
+      return {ok: true, plan, message: formatSessionPlan(plan)};
+    }
+    case 'clear_plan': {
+      const conversationId = String(ctx?.conversationId || deps.conversationId || '').trim();
+      if (!conversationId) throw new Error('clear_plan requires an active conversation');
+      const plan = clearSessionPlan(dataDir, conversationId);
+      broadcast({type: 'session_plan.updated', plan});
+      return {ok: true, plan, message: '已清空当前会话计划'};
+    }
+    case 'create_plan':
+    case 'update_plan': {
+      const conversationId = String(ctx?.conversationId || deps.conversationId || '').trim();
+      if (!conversationId) throw new Error('session plan requires an active conversation');
+      const merge = name === 'update_plan' ? args.merge !== false : false;
+      let items: Array<Partial<SessionPlanItem> & {content?: string}> = [];
+      if (Array.isArray(args.items) && args.items.length) {
+        items = args.items.map((raw: any) => ({
+          id: raw?.id ? String(raw.id) : undefined,
+          content: String(raw?.content || raw?.title || raw?.text || ''),
+          status: raw?.status,
+        }));
+      } else {
+        const text = String(args.text || args.plan || '').trim();
+        const steps = Array.isArray(args.steps) ? args.steps.map(String) : [];
+        const lines = steps.length ? steps : text.split(/\n+/);
+        items = lines
+          .map((line: string) => String(line).replace(/^\d+[.)、]\s*/, '').replace(/^[-*•]\s+/, '').trim())
+          .filter(Boolean)
+          .map((content: string) => ({content, status: 'pending' as const}));
+        if (text && !steps.length && items.length <= 1) {
+          items = [{content: text.slice(0, 400), status: 'pending'}];
+        }
+      }
+      if (!items.length) throw new Error('update_plan requires items (or text/steps)');
+      const plan = setSessionPlan(dataDir, conversationId, items, {
+        title: args.title ? String(args.title) : undefined,
+        merge: name === 'create_plan' ? false : merge,
+      });
+      broadcast({type: 'session_plan.updated', plan});
+      return {ok: true, plan, message: formatSessionPlan(plan)};
+    }
+    default:
+      throw new Error(`未知 Pattern 工具: ${toolName}`);
+  }
 }
 
 function resolveCompanionServerId(
@@ -621,14 +1374,28 @@ async function executeDesktopTool(toolName: string, args: Record<string, unknown
   }
 }
 
+type ChatOnceResult = {content: string; toolCalls: CompanionToolCall[]; raw: string};
+
 async function completeChatOnce(
   message: ChatRequest,
   system: string,
   signal?: AbortSignal,
-): Promise<string> {
+  options: {openAiTools?: ReturnType<typeof companionToolsAsOpenAi>} = {},
+): Promise<ChatOnceResult> {
   if (!config) throw new Error('runtime is not configured');
   const anthropic = config.provider.toLowerCase().includes('anthropic');
   const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
+  const openAiMessages = [{role: 'system', content: system}, ...message.history, {role: 'user', content: message.text}];
+  const openAiBody: Record<string, unknown> = {
+    model: config.model,
+    stream: false,
+    messages: openAiMessages,
+  };
+  // DeepSeek / OpenAI-compatible native tools (more reliable than free-form JSON for many models).
+  if (!anthropic && options.openAiTools?.length) {
+    openAiBody.tools = options.openAiTools;
+    openAiBody.tool_choice = 'auto';
+  }
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions'), anthropic
     ? {
         method: 'POST',
@@ -652,17 +1419,68 @@ async function completeChatOnce(
           'content-type': 'application/json',
           authorization: `Bearer ${config.apiKey}`,
         },
-        body: JSON.stringify({
-          model: config.model,
-          stream: false,
-          messages: [{role: 'system', content: system}, ...message.history, {role: 'user', content: message.text}],
-        }),
+        body: JSON.stringify(openAiBody),
         signal: requestSignal,
       });
   if (!response.ok) throw new Error(`model API status ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const json: any = await response.json();
+  const rawText = await response.text();
+  const ctype = response.headers.get('content-type') || '';
+  // Some providers (or test doubles) still stream even when stream:false was requested.
+  if (ctype.includes('text/event-stream') || rawText.trimStart().startsWith('data:')) {
+    let full = '';
+    let usage: any;
+    const streamedToolCalls: any[] = [];
+    for (const raw of rawText.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const json = JSON.parse(data);
+        const delta = anthropic ? json.delta?.text || json.content?.map?.((item: any) => item.text).join('') : json.choices?.[0]?.delta?.content || json.choices?.[0]?.message?.content;
+        if (typeof delta === 'string' && delta) full += delta;
+        const tc = json.choices?.[0]?.delta?.tool_calls || json.choices?.[0]?.message?.tool_calls;
+        if (Array.isArray(tc)) {
+          for (const part of tc) {
+            const idx = Number(part.index ?? streamedToolCalls.length);
+            if (!streamedToolCalls[idx]) streamedToolCalls[idx] = {function: {name: '', arguments: ''}};
+            if (part.function?.name) streamedToolCalls[idx].function.name += part.function.name;
+            if (part.function?.arguments) streamedToolCalls[idx].function.arguments += part.function.arguments;
+            if (part.id) streamedToolCalls[idx].id = part.id;
+          }
+        }
+        if (json.usage) usage = {...usage, ...json.usage};
+      } catch {
+        /* keepalive / partial */
+      }
+    }
+    if (usage) recordUsage(config.provider, config.model, usage);
+    const fromNative = toolCallsFromOpenAiMessage({tool_calls: streamedToolCalls.filter(Boolean)});
+    const fromText = extractCompanionToolPlan(full);
+    return {
+      content: full,
+      toolCalls: fromNative.length ? fromNative : (fromText?.toolCalls || []),
+      raw: full,
+    };
+  }
+  let json: any;
+  try {
+    json = JSON.parse(rawText);
+  } catch (error) {
+    throw new Error(`model API returned non-JSON body: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
+  }
   recordUsage(config.provider, config.model, json.usage);
-  return String(anthropic ? json.content?.map((item: any) => item.text).join('') : json.choices?.[0]?.message?.content || '');
+  const messageOut = anthropic
+    ? {content: json.content?.map((item: any) => item.text).join('') || '', tool_calls: json.content?.filter?.((item: any) => item.type === 'tool_use')}
+    : (json.choices?.[0]?.message || {});
+  const content = String(anthropic ? messageOut.content : (messageOut.content || ''));
+  const fromNative = toolCallsFromOpenAiMessage(messageOut);
+  const fromText = extractCompanionToolPlan(content);
+  return {
+    content,
+    toolCalls: fromNative.length ? fromNative : (fromText?.toolCalls || []),
+    raw: content,
+  };
 }
 
 async function runCompanionToolLoop(
@@ -678,27 +1496,26 @@ async function runCompanionToolLoop(
   const system = `${baseSystem}
 [Primary-agent tools]
 - You are the primary agent. Call tools yourself when action is required.
-- Sub-agents are ${allowSubAgents ? 'ENABLED: executor handoff may also auto-route heavy desktop goals' : 'DISABLED: no auto executor handoff; use desktop tools including computer_use yourself'}.
+- Computer Use is a dedicated MODE of the primary agent (not "ask user to open Tasks").
+- Sub-agents toggle this turn: ${allowSubAgents ? 'ON (may use dedicated worker model for heavy sessions)' : 'OFF (you still own Computer Use yourself)'}.
 - OS Bridge desktop tools: ${hasDesktop ? 'AVAILABLE' : 'UNAVAILABLE'}. MCP tools: ${hasMcp ? 'AVAILABLE' : 'NONE ENABLED'}.
 - Tool catalog (authoritative for this turn — only call tools listed here):
 ${companionToolCatalogText(tools)}
 [How to call tools — mandatory]
 - Tools needed → JSON ONLY, no markdown fences:
-  {"toolCalls":[{"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}],"final":""}
-- serverId="desktop" for OS tools; tool is SHORT NAME only (launch|key|type|click|scroll|foreground|focus|accessibility_tree|accessibility_action|screenshot|computer_use).
+  {"toolCalls":[{"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}],"final":""}
+- serverId="desktop" for OS tools; tool is SHORT NAME only (computer_use|launch|key|type|click|scroll|foreground|focus|accessibility_tree|accessibility_action|screenshot).
 - NEVER use tool="desktop:launch" or "desktop.launch".
-[Desktop recipes]
-1) Open app: {"serverId":"desktop","tool":"launch","arguments":{"app":"calc"|"notepad"|...}} — receipt includes UIA summary + foreground.
-2) Focus: {"serverId":"desktop","tool":"focus","arguments":{"hints":["Calculator","计算器"]}}
-3) Tree: {"serverId":"desktop","tool":"accessibility_tree","arguments":{}}
-4) Control: {"serverId":"desktop","tool":"accessibility_action","arguments":{"action":"invoke","name":"..."}}
-5) Key/type: key / type tools as needed.
-6) Multi-step computer-use mode: {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}} — enters the queued vision+UIA session. Prefer this for multi-step UI work.
+[Computer Use mode — primary path for desktop UI]
+- Multi-step UI goals (open app THEN operate / calculate / click through UI / fill forms) MUST enter mode first:
+  {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"<user goal>"}}
+- After enter, the runtime loop auto-provides per step: foreground title + screenshot + full UIA control tree, then executes controller actions. You do not need to manually chain launch→foreground→tree for multi-step work.
+- Atomic tools (launch/key/type/click/...) are ONLY for a single short action with no multi-step UI closed loop.
 [Policy]
 - No tools needed → answer in natural language.
 - Empty catalog / Bridge offline → say how to enable; no role-play.
-- Only assert facts from tool receipts. If foreground is still Pattern, do not claim you operated another app.
-- computer_use starts the full session; atomic tools are for short ops.`;
+- Only assert facts from tool receipts.
+- Prefer computer_use for any goal that needs seeing or controlling another app's UI.`;
 
   setAgentState('thinking');
   send(socket, {type: 'chat.started', id: message.id, slot: 'companion'});
@@ -715,29 +1532,94 @@ ${companionToolCatalogText(tools)}
     },
   });
 
-  // Non-streaming first pass so tool-plan JSON never becomes the visible final answer.
-  let draft = await completeChatOnce(message, system, signal);
+  const openAiTools = companionToolsAsOpenAi(tools);
+  // Pure conversation (no desktop/MCP intent) → real provider SSE typewriter, no tool probe round-trip.
+  const mayNeedTools = tools.length > 0 && (
+    shouldTransferToExecutor(message.text)
+    || /(工具|打开|截图|点击|按键|启动|运行|创建|提醒|技能|工作流|循环|目标|计划|主动|computer\s*use|tool|launch|click|screenshot|mcp|skill|workflow|goal|loop|remind)/i.test(message.text)
+  );
+  if (!tools.length || !mayNeedTools) {
+    const full = await streamChat(socket, message, system, 'companion', signal, {
+      emitStarted: false,
+      emitDone: true,
+      setIdleOnDone: true,
+    });
+    return full;
+  }
+
+  // Tool-capable turn: non-stream plan (native tool_calls + JSON protocol), then live-stream the final prose.
+  let result = await completeChatOnce(message, system, signal, {openAiTools});
   let history = [...message.history, {role: 'user' as const, content: message.text}];
+  let usedTools = false;
   for (let round = 0; round < 3; round++) {
     if (signal?.aborted) throw new Error('aborted');
-    const plan = extractCompanionToolPlan(draft);
-    if (!plan?.toolCalls?.length) break;
+    const toolCalls = result.toolCalls.length
+      ? result.toolCalls
+      : (extractCompanionToolPlan(result.content)?.toolCalls || []);
+    if (!toolCalls.length) break;
+    usedTools = true;
     const observations: string[] = [];
-    for (const call of plan.toolCalls.slice(0, 4)) {
+    for (const call of toolCalls.slice(0, 4)) {
       const toolName = normalizeCompanionToolName(String(call.tool || ''));
       const serverId = resolveCompanionServerId(call, toolName, tools);
       const eventId = `tool:${message.id}:${round}:${serverId || 'x'}:${toolName || 'tool'}`;
       const args = call.arguments && typeof call.arguments === 'object' ? call.arguments as Record<string, unknown> : {};
       try {
+        if (
+          serverId === PATTERN_SERVER_ID
+          || toolName.startsWith('pattern_')
+          || tools.some((t) => t.kind === 'pattern' && t.name === toolName)
+        ) {
+          const patternName = toolName.replace(/^pattern_/, '');
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `pattern.${patternName}`, text: `Pattern · ${patternName}`, status: 'running', ts: Date.now()}});
+          const toolResult = await executePatternTool(patternName, args, {
+            conversationId: message.sessionId,
+            workspace: message.workspace,
+            projectName: message.projectName,
+          });
+          const receipt = JSON.stringify(toolResult).slice(0, 8000);
+          observations.push(`pattern:${patternName}: ${receipt}`);
+          let doneText = `${patternName} 完成`;
+          if ((patternName === 'update_plan' || patternName === 'create_plan' || patternName === 'get_plan' || patternName === 'clear_plan')
+            && toolResult && typeof toolResult === 'object' && (toolResult as any).plan?.items) {
+            const planItems = (toolResult as any).plan.items as Array<{status?: string; content?: string}>;
+            const doneN = planItems.filter((i) => i.status === 'completed').length;
+            const totalN = planItems.filter((i) => i.status !== 'cancelled').length;
+            const running = planItems.find((i) => i.status === 'in_progress');
+            doneText = running
+              ? `会话计划 ${doneN}/${totalN} · 进行中：${String(running.content || '').slice(0, 40)}`
+              : `会话计划 ${doneN}/${totalN} 已更新`;
+          }
+          if ((patternName === 'update_goal' || patternName === 'create_goal' || patternName === 'control_goal' || patternName === 'get_goal')
+            && toolResult && typeof toolResult === 'object' && (toolResult as any).goal) {
+            const g = (toolResult as any).goal;
+            const tail = Array.isArray(g.progress) && g.progress.length ? String(g.progress[g.progress.length - 1]).slice(0, 48) : '';
+            doneText = g.status === 'done'
+              ? `目标已完成：${String(g.objective || '').slice(0, 40)}`
+              : `目标 · ${g.status}${tail ? ` · ${tail}` : ''}`;
+          }
+          if (patternName === 'create_reminder' || patternName === 'delete_reminder' || patternName === 'list_reminders') {
+            doneText = String((toolResult as any)?.message || doneText).slice(0, 80);
+          }
+          if (patternName === 'create_loop' || patternName === 'list_loops' || patternName === 'delete_loop') {
+            doneText = String((toolResult as any)?.message || doneText).slice(0, 80);
+          }
+          if (patternName === 'create_skill' || patternName === 'list_skills' || patternName === 'run_skill') {
+            doneText = String((toolResult as any)?.message || doneText).slice(0, 80);
+          }
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `pattern.${patternName}`, text: doneText, status: 'done', receipt, ts: Date.now()}});
+          continue;
+        }
         if (serverId === DESKTOP_SERVER_ID || tools.some((t) => t.kind === 'desktop' && t.name === toolName && (!call.serverId || call.serverId === DESKTOP_SERVER_ID))) {
           send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `desktop.${toolName}`, text: `桌面工具 ${toolName}`, status: 'running', ts: Date.now()}});
           const toolArgs = toolName === 'computer_use'
             ? {...args, conversationId: message.sessionId, workspace: message.workspace, projectName: message.projectName}
             : args;
-          const result = await executeDesktopTool(toolName, toolArgs);
-          const receipt = JSON.stringify(result).slice(0, 8000);
+          const toolResult = await executeDesktopTool(toolName, toolArgs);
+          const receipt = JSON.stringify(toolResult).slice(0, 8000);
           observations.push(`desktop:${toolName}: ${receipt}`);
-          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `desktop.${toolName}`, text: `${toolName} 完成`, status: 'done', receipt, ts: Date.now()}});
+          const resultTaskId = toolResult && typeof toolResult === 'object' && (toolResult as any).taskId ? String((toolResult as any).taskId) : undefined;
+          send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'tool', action: `desktop.${toolName}`, text: toolName === 'computer_use' ? `已进入 computer-use · ${(toolResult as any)?.title || toolName}` : `${toolName} 完成`, status: 'done', receipt, taskId: resultTaskId, ts: Date.now()}});
           continue;
         }
         const server = mcpServers.find((item) => item.id === serverId)
@@ -748,8 +1630,8 @@ ${companionToolCatalogText(tools)}
           continue;
         }
         send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'mcp', action: `${server.id}.${toolName}`, text: `调用 ${server.name}/${toolName}`, status: 'running', ts: Date.now()}});
-        const result = await callMcpTool(server, toolName, args);
-        const receipt = JSON.stringify(result).slice(0, 8000);
+        const mcpResult = await callMcpTool(server, toolName, args);
+        const receipt = JSON.stringify(mcpResult).slice(0, 8000);
         observations.push(`${server.id}:${toolName}: ${receipt}`);
         send(socket, {type: 'chat.event', id: message.id, event: {id: eventId, kind: 'mcp', action: `${server.id}.${toolName}`, text: `${toolName} 完成`, status: 'done', receipt, ts: Date.now()}});
       } catch (error) {
@@ -760,26 +1642,48 @@ ${companionToolCatalogText(tools)}
     }
     history = [
       ...history,
-      {role: 'assistant' as const, content: draft},
-      {role: 'user' as const, content: `[Tool receipts — facts only]\n${observations.join('\n')}\n说明：launch 回执若含 accessibility.controls，可直接用于 accessibility_action；若 foreground.title 仍是 Pattern，先 focus 再操作。\n请基于以上真实回执给出最终答复；不要再输出 toolCalls JSON，除非确实还需要另一轮工具。没有回执的动作不得声称成功。`},
+      {role: 'assistant' as const, content: result.content || result.raw || JSON.stringify({toolCalls})},
+      {role: 'user' as const, content: `[Tool receipts — facts only]\n${observations.join('\n')}\n说明：launch 回执若含 accessibility.controls，可直接用于 accessibility_action；若 foreground.title 仍是 Pattern，先 focus 再操作。\n请基于以上真实回执给出最终自然语言答复；不要再输出 toolCalls JSON，除非确实还需要另一轮工具。没有回执的动作不得声称成功。`},
     ];
-    draft = await completeChatOnce({
+    result = await completeChatOnce({
       ...message,
       text: history[history.length - 1]!.content,
       history: history.slice(0, -1),
-    }, system, signal);
+    }, system, signal, {openAiTools});
   }
 
-  // Stream only the final natural-language answer.
-  if (draft.trim()) {
-    const chunkSize = 64;
-    for (let i = 0; i < draft.length; i += chunkSize) {
-      send(socket, {type: 'chat.delta', id: message.id, delta: draft.slice(i, i + chunkSize)});
+  let finalText = (result.content || result.raw || '').trim();
+  if (extractCompanionToolPlan(finalText)?.toolCalls?.length) {
+    finalText = finalText.replace(/\{[\s\S]*"toolCalls"[\s\S]*\}/g, '').trim()
+      || (usedTools ? '已执行工具，但模型没有给出自然语言总结。' : '模型只返回了工具计划，未能完成调用。请重试。');
+  }
+
+  if (usedTools) {
+    // Live SSE wrap-up after tools (real provider token deltas).
+    const wrap = await streamChat(socket, {
+      ...message,
+      text: history[history.length - 1]?.content || message.text,
+      history: history.slice(0, -1),
+    }, `${system}\n[Final answer] Reply in natural language only. No toolCalls JSON.`, 'companion', signal, {
+      emitStarted: false,
+      emitDone: false,
+      setIdleOnDone: false,
+    });
+    finalText = wrap.trim() || finalText;
+  } else if (finalText) {
+    // Tool catalog exists but this turn needed no tools: avoid a second model call;
+    // emit paced deltas so the UI still typewrites instead of dumping the whole blob at once.
+    const chunkSize = 6;
+    for (let i = 0; i < finalText.length; i += chunkSize) {
+      if (signal?.aborted) break;
+      send(socket, {type: 'chat.delta', id: message.id, delta: finalText.slice(i, i + chunkSize)});
+      await new Promise((resolve) => setTimeout(resolve, 14));
     }
   }
+
   send(socket, {type: 'chat.done', id: message.id, slot: 'companion'});
   setAgentState('idle');
-  return draft;
+  return finalText;
 }
 
 async function askChildAgent(prompt: string, useAgentModel = true): Promise<string> {
@@ -1083,8 +1987,10 @@ function loadSecurityPolicy(): SecurityPolicyState {
       workspaceRoot: raw.workspaceRoot ? String(raw.workspaceRoot) : null,
       enforceWorkspace: raw.enforceWorkspace !== false,
       requireRecoveryForWorkspaceWrites: raw.requireRecoveryForWorkspaceWrites !== false,
-      autoApproveBelow: Math.min(3, Math.max(0, Number(raw.autoApproveBelow ?? 2))),
-      hardDenyAt: Math.min(3, Math.max(1, Number(raw.hardDenyAt ?? 3))),
+      // 4 is an intentional "above every known tier" sentinel used by the UI's
+      // fully-allow and approve-everything modes. Actual action tiers remain 0–3.
+      autoApproveBelow: Math.min(4, Math.max(0, Number(raw.autoApproveBelow ?? 2))),
+      hardDenyAt: Math.min(4, Math.max(1, Number(raw.hardDenyAt ?? 3))),
       tierGuide: Array.isArray(raw.tierGuide) && raw.tierGuide.length ? raw.tierGuide : [...DEFAULT_SECURITY_POLICY.tierGuide],
     };
   } catch {
@@ -1389,7 +2295,13 @@ async function getIdleSeconds(): Promise<number> {
 function buildSystemPrompt(
   memHits: MemoryRecord[],
   _slot: 'companion' | 'executor' = 'companion',
-  context?: {workspace?: string; projectName?: string; attachments?: string[]; allowSubAgents?: boolean},
+  context?: {
+    workspace?: string;
+    projectName?: string;
+    attachments?: string[];
+    allowSubAgents?: boolean;
+    conversationId?: string;
+  },
 ) {
   // Layers: persona (user) + primary runtime (product) + rules. Tool catalog is appended per-turn in runCompanionToolLoop.
   // Spec: docs/system-prompt.md
@@ -1419,6 +2331,26 @@ function buildSystemPrompt(
 ${context.attachments?.length ? `- User attached paths this turn:\n${context.attachments.map((p) => `  - ${p}`).join('\n')}` : '- No file attachments this turn.'}`
     : `[Active project workspace]
 - None (global companion chat).`;
+  const sessionPlan = context?.conversationId ? getSessionPlan(dataDir, context.conversationId) : null;
+  const planBlock = sessionPlan?.items?.length
+    ? `[Current session plan · todo checklist]
+${formatSessionPlan(sessionPlan)}
+- Update progress with pattern.update_plan (mark in_progress / completed) as you work.
+- This plan is scoped to this conversation only — not a scheduled desktop task.`
+    : `[Current session plan · todo checklist]
+- (empty) For multi-step work, create a short plan with pattern.update_plan or ask the user to /plan.`;
+  const goalsNow = loadGoals(dataDir);
+  const active = goalsNow.find((g) => g.status === 'active' || g.status === 'paused' || g.status === 'blocked');
+  const goalBlock = active
+    ? `[Active goal · run-until-done]
+- Status: ${active.status}
+- Objective: ${active.objective}
+${active.blockedReason ? `- Blocked: ${active.blockedReason}` : ''}
+${active.progress?.length ? `- Recent progress:\n${active.progress.slice(-5).map((p) => `  - ${p}`).join('\n')}` : '- No progress notes yet.'}
+- Keep advancing this goal. Use pattern.update_goal with message=progress, completed=true when verified, or blocked_reason when stuck.
+- The desktop UI shows this goal continuously until completed/cleared.`
+    : `[Active goal · run-until-done]
+- (none) Create with /goal or pattern.create_goal when the user wants a verifiable long-running objective.`;
   return `${persona}
 [Identity]
 - Your name: ${name}
@@ -1432,6 +2364,8 @@ ${details}
 [Environment]
 ${env}
 ${workspaceBlock}
+${goalBlock}
+${planBlock}
 [Capability honesty]
 - Tools available this turn are listed only in the later [Primary-agent tools] / tool catalog section (desktop + MCP).
 - If the catalog shows no desktop tools, OS Bridge is offline — you cannot press keys or open apps until Bridge is connected.
@@ -1446,22 +2380,32 @@ ${workspaceBlock}
 - Do not ask the user to open the tasks page or press a handoff button to make work happen.
 - Never claim you read or modified project files unless tool receipts or attached contents prove it.
 - When the user asks to open an app or operate the desktop, follow [Tool calling method].
+- Users may create skills / tasks / workflows / reminders / proactive triggers with natural language OR slash commands (/goal /skill /loop /plan /task /remind /proactive /workflow /help). Prefer pattern.* tools to persist them.
+- @skill:name @workflow:id @task:title mentions inject context; honor them.
+[Slash & Pattern tools]
+- Slash and NL both map to pattern.* tools (serverId=\"pattern\"). Prefer tools over role-play.
+- /goal → create_goal | update_goal | control_goal | get_goal
+- /plan → create_plan | update_plan | get_plan | clear_plan  (session todo checklist, not a scheduled task)
+- /skill → create_skill | list_skills | run_skill
+- /loop → create_loop | list_loops | delete_loop
+- /task → create_task | list_tasks
+- /remind → create_reminder | list_reminders | delete_reminder
+- /proactive → trigger_proactive (action=trigger|pause|resume)
+- /workflow → create_workflow | list_workflows | run_workflow
+- When user speaks natural language (「设定目标」「写个计划」「每天 21:30 提醒」「每隔半小时巡检」), call the matching pattern tool.
 [Tool calling method]
-- Need tools? Reply with JSON ONLY (no fences, no extra prose):
-  {"toolCalls":[{"serverId":"desktop","tool":"SHORT_NAME","arguments":{...}}],"final":""}
-- serverId: "desktop" for OS Bridge, or MCP server id from catalog.
-- tool SHORT NAMES ONLY: launch, key, type, click, scroll, foreground, focus, accessibility_tree, accessibility_action, screenshot, computer_use.
+- Need tools? Prefer native tool_calls when the API supports tools; else JSON ONLY:
+  {"toolCalls":[{"serverId":"pattern|desktop|<mcp>","tool":"SHORT_NAME","arguments":{...}}],"final":""}
+- serverId: "pattern" for skill/task/goal/loop/reminder/workflow/plan/proactive, "desktop" for OS Bridge, or MCP server id.
+- pattern SHORT_NAME examples: create_goal, update_plan, create_reminder, create_loop, create_skill, run_workflow.
+- desktop tools: computer_use, launch, key, type, click, scroll, foreground, focus, accessibility_tree, accessibility_action, screenshot.
 - NEVER set tool to "desktop:launch" or "desktop.launch" — put "desktop" in serverId.
-- Open app: {"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}
-  Known apps: notepad, calc, calculator, explorer, cmd, powershell, browser, settings, paint, snippingtool. Or arguments.command.
-  Launch receipt includes focus attempt, foreground title, summarized UIA tree.
-- Focus if Pattern still frontmost: {"serverId":"desktop","tool":"focus","arguments":{"hints":["Calculator","计算器"]}}
-- UIA invoke: {"serverId":"desktop","tool":"accessibility_action","arguments":{"action":"invoke","name":"..."}}
-- Keys/type: {"serverId":"desktop","tool":"key","arguments":{"key":"enter"}} / {"serverId":"desktop","tool":"type","arguments":{"text":"..."}}
-- Multi-step desktop UI closed loop (screenshot+UIA each step): {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}
-  Prefer computer_use for multi-step UI goals; atomic tools for short single actions.
+- Computer Use MODE (required for multi-step UI: open app + operate, calculate, click controls):
+  {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}
+  Entering this mode starts a closed loop that injects screenshot + UIA tree every step. Do not fake multi-step UI with only launch+foreground.
+- Single short action only (no multi-step UI): launch / key / type / click etc.
 - MCP: {"serverId":"<id>","tool":"<name>","arguments":{}} only if listed in this turn's catalog.
-- After receipts: natural-language answer; only claim what receipts prove. If foreground is still Pattern, do not claim another app was operated.`;
+- After receipts: natural-language answer; only claim what receipts prove.`;
 }
 function listJournal(limit = 80, query?: string | null) {
   try {
@@ -2177,10 +3121,105 @@ async function chat(socket: WebSocket, message: ChatRequest) {
   activeChats.set(message.id, {controller, socket});
   try {
     const allowSubAgents = message.allowSubAgents !== false;
-    const routed = message.slot || (await classifyRoute(message.text)).slot;
-    // Only spawn the desktop executor worker when sub-agents are enabled.
-    // When disabled, primary agent keeps the chat turn and uses tools itself.
-    if (allowSubAgents && routed === 'executor') {
+
+    // Slash commands (/goal /skill /loop /plan …) short-circuit into structured handlers.
+    const slash = parseSlashCommand(message.text);
+    if (slash) {
+      setAgentState('thinking');
+      send(socket, {type: 'chat.started', id: message.id, slot: 'companion'});
+      send(socket, {
+        type: 'chat.event',
+        id: message.id,
+        event: {
+          id: `slash:${message.id}`,
+          kind: 'tool',
+          action: `slash.${slash.kind}`,
+          text: `斜杠指令 · /${slash.kind}`,
+          status: 'running',
+          ts: Date.now(),
+        },
+      });
+      try {
+        const reply = await executeSlashCommand(slash, makeSlashDeps({
+          conversationId: message.sessionId,
+          workspace: message.workspace,
+          projectName: message.projectName,
+        }));
+        // Keep dedicated UIs in sync after any slash side-effect.
+        if (slash.kind === 'goal') {
+          const goals = loadGoals(dataDir);
+          const goal = goals.find((g: GoalState) => g.status === 'active' || g.status === 'paused' || g.status === 'done' || g.status === 'blocked') || goals[0];
+          if (goal) broadcast({type: 'goal.updated', goal, goals});
+        }
+        if (slash.kind === 'plan' && message.sessionId) {
+          const plan = getSessionPlan(dataDir, message.sessionId);
+          if (plan) broadcast({type: 'session_plan.updated', plan});
+        }
+        if (slash.kind === 'skill') {
+          broadcast({type: 'skill.updated', id: message.id, skills: allSkills()});
+        }
+        if (slash.kind === 'remind' || slash.kind === 'loop') {
+          broadcast({type: 'cron.config', id: message.id, triggers: cronTriggers});
+        }
+        if (slash.kind === 'proactive' && config?.proactive) {
+          broadcast({
+            type: 'proactive.config',
+            id: message.id,
+            enabled: config.proactive.enabled !== false,
+            paused: !!config.proactive.paused,
+            bedtimeHour: config.proactive.bedtimeHour ?? 23,
+          });
+        }
+        // task/loop/workflow/skill-run already announce via createTaskFromText → task.updated
+        const slashLabels: Record<string, string> = {
+          goal: '目标已更新 · 见顶栏 Goal',
+          plan: '会话计划已更新 · 见顶栏 Plan',
+          loop: '循环已创建 · 见顶栏 Loop / 任务页',
+          skill: '技能已处理 · 见侧栏「技能」',
+          task: '任务已创建 · 见侧栏「任务」',
+          remind: '提醒已设置 · 见顶栏 Remind / 主动页',
+          proactive: '主动设置已更新 · 见侧栏「主动」',
+          workflow: '工作流已处理 · 见侧栏「技能」与任务',
+          help: '帮助',
+          unknown: '未识别指令',
+        };
+        send(socket, {
+          type: 'chat.event',
+          id: message.id,
+          event: {
+            id: `slash:${message.id}`,
+            kind: 'tool',
+            action: `slash.${slash.kind}`,
+            text: slashLabels[slash.kind] || `/${slash.kind} 完成`,
+            status: 'done',
+            ts: Date.now(),
+          },
+        });
+        const chunkSize = 48;
+        for (let i = 0; i < reply.length; i += chunkSize) {
+          send(socket, {type: 'chat.delta', id: message.id, delta: reply.slice(i, i + chunkSize)});
+        }
+        send(socket, {type: 'chat.done', id: message.id, slot: 'companion'});
+      } catch (error) {
+        send(socket, {
+          type: 'chat.error',
+          id: message.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setAgentState('idle');
+      }
+      return;
+    }
+
+    // Computer Use is a primary-agent MODE. Re-classify even if the client forced slot=companion.
+    // allowSubAgents only affects worker-model preference later — it must NOT block mode entry.
+    const classified = await classifyRoute(message.text);
+    const wantsComputerUse =
+      message.slot === 'executor'
+      || shouldTransferToExecutor(message.text)
+      || (classified.slot === 'executor' && classified.confidence >= 0.85);
+    if (wantsComputerUse) {
       const title = taskTitleFromText(message.text);
       const task = await createTaskFromText(title, message.text, scheduleFromText(message.text), undefined, undefined, {
         conversationId: message.sessionId,
@@ -2189,9 +3228,31 @@ async function chat(socket: WebSocket, message: ChatRequest) {
       });
       send(socket, {type: 'chat.started', id: message.id, slot: 'executor'});
       send(socket, {
+        type: 'chat.event',
+        id: message.id,
+        event: {
+          id: `task:${task.id}:start`,
+          kind: 'tool',
+          action: 'computer_use',
+          text: `已进入 computer-use · ${task.title}`,
+          status: 'running',
+          taskId: task.id,
+          receipt: JSON.stringify({
+            mode: 'computer_use',
+            taskId: task.id,
+            status: task.status,
+            title: task.title,
+            allowSubAgents,
+            note: 'Per-step UIA tree + screenshot injected inside the computer-use loop',
+          }),
+          ts: Date.now(),
+        },
+      });
+      send(socket, {
         type: 'chat.delta',
         id: message.id,
-        delta: `好的，我来处理：${task.title}\n已开始桌面执行（子 Agent 执行器）。进度会同步在这条对话里。`,
+        delta: `好的，我来处理：${task.title}
+已进入 computer-use 模式（每步自动注入前台窗口 UIA 控件树 + 截图并执行操作）。进度会显示在上方「工作过程」里。`,
       });
       send(socket, {type: 'chat.done', id: message.id, slot: 'executor'});
       return;
@@ -2215,13 +3276,24 @@ async function chat(socket: WebSocket, message: ChatRequest) {
         },
       });
     }
+    const mentionBlock = enrichWithMentions(message.text, {
+      allSkills,
+      getWorkflows: allWorkflows,
+      getTasks: () => tasks,
+      projectName: message.projectName,
+      workspace: message.workspace,
+    });
+    const enrichedMessage = mentionBlock
+      ? {...message, text: `${message.text}\n\n${mentionBlock}`}
+      : message;
     const system = buildSystemPrompt(hits, 'companion', {
       workspace: message.workspace,
       projectName: message.projectName,
       attachments: message.attachments,
       allowSubAgents,
+      conversationId: message.sessionId,
     });
-    const full = await runCompanionToolLoop(socket, message, system, controller.signal);
+    const full = await runCompanionToolLoop(socket, enrichedMessage, system, controller.signal);
     void extractMemories(message.text, full, message.sessionId).then(() => {
       const related = memoryProposals.filter((item) => item.sourceConv === (message.sessionId || null)).slice(0, 5);
       if (related.length) {
@@ -2817,8 +3889,8 @@ case 'journal.list': {
         if ('workspaceRoot' in next) securityPolicy.workspaceRoot = next.workspaceRoot ? String(next.workspaceRoot) : null;
         if ('enforceWorkspace' in next) securityPolicy.enforceWorkspace = next.enforceWorkspace !== false;
         if ('requireRecoveryForWorkspaceWrites' in next) securityPolicy.requireRecoveryForWorkspaceWrites = next.requireRecoveryForWorkspaceWrites !== false;
-        if ('autoApproveBelow' in next) securityPolicy.autoApproveBelow = Math.min(3, Math.max(0, Number(next.autoApproveBelow)));
-        if ('hardDenyAt' in next) securityPolicy.hardDenyAt = Math.min(3, Math.max(1, Number(next.hardDenyAt)));
+        if ('autoApproveBelow' in next) securityPolicy.autoApproveBelow = Math.min(4, Math.max(0, Number(next.autoApproveBelow)));
+        if ('hardDenyAt' in next) securityPolicy.hardDenyAt = Math.min(4, Math.max(1, Number(next.hardDenyAt)));
         saveSecurityPolicy();
         appendJournal({line: `security.policy updated enforce=${securityPolicy.enforceWorkspace} requireRecovery=${securityPolicy.requireRecoveryForWorkspaceWrites} root=${securityPolicy.workspaceRoot || '-'} auto<${securityPolicy.autoApproveBelow} deny>=${securityPolicy.hardDenyAt}`, kind: 'policy', decision: 'info'});
         send(socket, {type: 'security.policy', id: message.id, policy: securityPolicy});
@@ -2830,6 +3902,7 @@ case 'journal.list': {
       }
       case 'proactive.setPaused': {
         proactive.setPaused(message.paused);
+        if (config?.proactive) config.proactive = {...config.proactive, paused: message.paused};
         const c = proactive.getConfig();
         send(socket, {
           type: 'proactive.config',
@@ -2842,6 +3915,39 @@ case 'journal.list': {
       }
       case 'proactive.getConfig': {
         const c = proactive.getConfig();
+        send(socket, {
+          type: 'proactive.config',
+          id: message.id,
+          enabled: c.enabled,
+          paused: c.paused,
+          bedtimeHour: c.bedtimeHour,
+        });
+        break;
+      }
+      case 'proactive.setConfig': {
+        const next = {
+          enabled: message.enabled !== undefined ? !!message.enabled : proactive.getConfig().enabled,
+          paused: message.paused !== undefined ? !!message.paused : proactive.getConfig().paused,
+          bedtimeHour: message.bedtimeHour !== undefined
+            ? Math.min(23, Math.max(0, Number(message.bedtimeHour)))
+            : proactive.getConfig().bedtimeHour,
+        };
+        proactive.setConfig(next);
+        if (config) {
+          config.proactive = {
+            enabled: next.enabled,
+            paused: next.paused,
+            bedtimeHour: next.bedtimeHour,
+          };
+        }
+        const c = proactive.getConfig();
+        broadcast({
+          type: 'proactive.config',
+          id: message.id,
+          enabled: c.enabled,
+          paused: c.paused,
+          bedtimeHour: c.bedtimeHour,
+        });
         send(socket, {
           type: 'proactive.config',
           id: message.id,
@@ -2906,11 +4012,136 @@ case 'journal.list': {
         break;
       }
       case 'workflow.list': {
-        send(socket, {type:'workflow.list.result', id:message.id, workflows:codingWorkflows});
+        send(socket, {type:'workflow.list.result', id:message.id, workflows:allWorkflows()});
+        break;
+      }
+      case 'goal.list': {
+        send(socket, {type: 'goal.list.result', id: message.id, goals: loadGoals(dataDir)});
+        break;
+      }
+      case 'goal.set': {
+        const objective = String(message.objective || '').trim().slice(0, 2000);
+        if (!objective) {
+          send(socket, {type: 'error', id: message.id, message: '请填写目标内容'});
+          break;
+        }
+        let goals = loadGoals(dataDir).map((g) =>
+          g.status === 'active' || g.status === 'paused'
+            ? {...g, status: 'cleared' as const, updatedAt: Date.now()}
+            : g,
+        );
+        const task = await createTaskFromText(
+          taskTitleFromText(objective),
+          `[Goal]\n${objective}\n\n完成条件：目标被验证达成后，用 pattern.update_goal 标记 completed。`,
+          undefined,
+          undefined,
+          undefined,
+          {
+            conversationId: message.conversationId,
+            workspace: message.workspace,
+            projectName: message.projectName,
+          },
+        );
+        const goal: GoalState = {
+          id: randomUUID(),
+          objective,
+          status: 'active',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          taskId: task.id,
+          conversationId: message.conversationId,
+          progress: [`已创建并排队执行 · ${new Date().toLocaleString('zh-CN')}`],
+        };
+        goals = [goal, ...goals].slice(0, 50);
+        saveGoals(dataDir, goals);
+        broadcast({type: 'goal.updated', goal, goals});
+        send(socket, {type: 'goal.list.result', id: message.id, goals});
+        break;
+      }
+      case 'goal.control': {
+        const goals = loadGoals(dataDir);
+        const goal = goals.find((g) => g.id === message.goalId);
+        if (!goal) {
+          send(socket, {type: 'error', id: message.id, message: 'goal not found'});
+          break;
+        }
+        if (message.action === 'pause') {
+          if (goal.status !== 'active') {
+            send(socket, {type: 'error', id: message.id, message: '只有进行中的目标可以暂停'});
+            break;
+          }
+          goal.status = 'paused';
+        } else if (message.action === 'resume') {
+          if (goal.status !== 'paused') {
+            send(socket, {type: 'error', id: message.id, message: '只有已暂停的目标可以恢复'});
+            break;
+          }
+          goal.status = 'active';
+        } else if (message.action === 'clear') {
+          goal.status = 'cleared';
+        } else if (message.action === 'complete') {
+          goal.status = 'done';
+          goal.progress = [...(goal.progress || []), `已标记完成 · ${new Date().toLocaleString('zh-CN')}`].slice(-20);
+        }
+        goal.updatedAt = Date.now();
+        saveGoals(dataDir, goals);
+        broadcast({type: 'goal.updated', goal, goals});
+        send(socket, {type: 'goal.list.result', id: message.id, goals});
+        break;
+      }
+      case 'goal.update': {
+        const goals = loadGoals(dataDir);
+        const goal = goals.find((g) => g.id === message.goalId);
+        if (!goal) {
+          send(socket, {type: 'error', id: message.id, message: 'goal not found'});
+          break;
+        }
+        if (message.progress?.trim()) {
+          goal.progress = [...(goal.progress || []), message.progress.trim().slice(0, 500)].slice(-20);
+        }
+        if (message.status) goal.status = message.status;
+        if (message.blockedReason !== undefined) {
+          goal.blockedReason = message.blockedReason.slice(0, 500) || undefined;
+          if (message.blockedReason.trim() && !message.status) goal.status = 'blocked';
+        }
+        goal.updatedAt = Date.now();
+        saveGoals(dataDir, goals);
+        broadcast({type: 'goal.updated', goal, goals});
+        send(socket, {type: 'goal.list.result', id: message.id, goals});
+        break;
+      }
+      case 'session_plan.get': {
+        const plan = getSessionPlan(dataDir, String(message.conversationId || ''));
+        send(socket, {type: 'session_plan.result', id: message.id, plan});
+        break;
+      }
+      case 'session_plan.set': {
+        const conversationId = String(message.conversationId || '').trim();
+        if (!conversationId) {
+          send(socket, {type: 'error', id: message.id, message: 'conversationId required'});
+          break;
+        }
+        const plan = setSessionPlan(dataDir, conversationId, message.items || [], {
+          title: message.title,
+          merge: !!message.merge,
+        });
+        broadcast({type: 'session_plan.updated', plan});
+        send(socket, {type: 'session_plan.result', id: message.id, plan});
+        break;
+      }
+      case 'session_plan.clear': {
+        const conversationId = String(message.conversationId || '').trim();
+        if (!conversationId) {
+          send(socket, {type: 'error', id: message.id, message: 'conversationId required'});
+          break;
+        }
+        const plan = clearSessionPlan(dataDir, conversationId);
+        broadcast({type: 'session_plan.updated', plan});
+        send(socket, {type: 'session_plan.result', id: message.id, plan});
         break;
       }
       case 'workflow.run': {
-        const workflow = codingWorkflows.find((item) => item.id === message.workflowId);
+        const workflow = allWorkflows().find((item) => item.id === message.workflowId);
         if (!workflow) { send(socket, {type:'error', id:message.id, message:'workflow not found'}); break; }
         const skillText = workflow.skillIds.map((id) => allSkills().find((skill) => skill.id === id)).filter(Boolean).map((skill) => `${skill!.name}：${skill!.prompt} 权限：${skill!.permissions.join(', ')}`).join('\n');
         let workspace = message.workspace;
@@ -3044,6 +4275,24 @@ case 'journal.list': {
         else if (message.action === 'resume' && task.status === 'paused') {
           if (task.schedule) { task.schedule.enabled = true; task.status = 'scheduled'; }
           else task.status = 'running';
+        } else if (message.action === 'run') {
+          if (['running', 'queued', 'awaiting_approval'].includes(task.status)) {
+            send(socket, {type: 'error', id: message.id, message: '任务已在执行中'});
+            break;
+          }
+          if (task.status === 'cancelled') {
+            send(socket, {type: 'error', id: message.id, message: '已终止的任务不能再执行'});
+            break;
+          }
+          // One-shot run (plan-only / idle scheduled tasks).
+          if (task.schedule) task.schedule = {...task.schedule, enabled: false};
+          task.status = 'queued';
+          task.error = undefined;
+          saveTasks();
+          announceTask(task);
+          enqueueComputerUseTask(task);
+          send(socket, {type: 'task.list.result', id: message.id, tasks});
+          break;
         } else if (message.action === 'cancel') {
           task.status = 'cancelled';
           finishTaskRun(task, 'cancelled');

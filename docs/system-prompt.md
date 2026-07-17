@@ -35,25 +35,42 @@ It is **not** a Claude Fable / Anthropic product prompt. Do not copy third-party
 
 There is no user-facing "交给子代理" requirement. Tasks page is inspection only.
 
-## Built-in desktop tools
+## Computer Use mode (primary path for multi-step desktop UI)
 
-Exposed to the primary agent as `serverId: "desktop"`:
+Computer Use is a **dedicated mode** owned by the primary agent. It is **not** the same as “user opens Tasks” and is **not** blocked by the sub-agent toggle.
+
+### Enter mode
+
+```json
+{"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}
+```
+
+Or the runtime auto-enters when the user message is a clear multi-step desktop intent.
+
+### Inside the mode (automatic each step)
+
+1. Read foreground window title  
+2. Capture screenshot  
+3. Read **Windows UI Automation control tree** (`/accessibility/tree`) and inject it into the controller prompt  
+4. Controller returns one action (`uiaInvoke` / `uiaSetValue` / `key` / `type` / …)  
+5. OS Bridge executes; loop until done (max 20 steps)
+
+So: **UIA tree is fed to the AI only after Computer Use mode is entered** (or if the model explicitly calls the atomic `accessibility_tree` tool for a single-shot inspection).
+
+### Atomic desktop tools (single short actions only)
+
+Exposed as `serverId: "desktop"` for one-shot ops — **not** a substitute for multi-step UI closed loops:
 
 | Tool | Purpose |
 |------|---------|
-| `launch` (`serverId: desktop`) | Launch a common app / shell target. **Auto-enriches** with focus attempt, foreground title, and summarized UIA controls. |
-| `key` (`serverId: desktop`) | Press a key or key chord via OS Bridge |
-| `type` (`serverId: desktop`) | Type text via OS Bridge |
-| `click` (`serverId: desktop`) | Click at coordinates via OS Bridge |
-| `scroll` (`serverId: desktop`) | Scroll via OS Bridge |
-| `foreground` (`serverId: desktop`) | Read foreground window title |
-| `focus` (`serverId: desktop`) | Bring a window to foreground by title hints |
+| `computer_use` | **Enter Computer Use mode** (required for multi-step UI) |
+| `launch` | Launch a common app / shell target |
+| `key` / `type` / `click` / `scroll` | Single input actions |
+| `foreground` / `focus` | Window title / focus helpers |
+| `accessibility_tree` / `accessibility_action` | Single-shot UIA read/act |
+| `screenshot` | Single-shot capture metadata |
 
-| `accessibility_tree` (`serverId: desktop`) | Read UIA/AX control tree of foreground window |
-| `accessibility_action` (`serverId: desktop`) | Invoke / setValue on a control |
-| `screenshot` (`serverId: desktop`) | Capture screen; model receives path/meta, not full base64 |
-
-If OS Bridge is offline, desktop tools are **omitted** from the catalog (or return failed receipts). The model must not invent success.
+If OS Bridge is offline, desktop tools are omitted. Never invent success.
 
 ## Tool call protocol (how to call)
 
@@ -80,36 +97,17 @@ When tools are needed, reply with **JSON only** (no markdown fences, no prose ar
 
 ### Desktop recipes
 
-**Open app (preferred):**
-```json
-{"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}
-```
-Known `app` ids: `notepad`, `calc`/`calculator`, `explorer`, `cmd`, `powershell`, `browser`, `settings`, `paint`, `snippingtool`.  
-Or `{"command":"path-or-shell"}`.  
-**Launch receipts include** focus attempt, foreground title, and a summarized UIA tree.
-
-**If Pattern still owns focus:**
-```json
-{"serverId":"desktop","tool":"focus","arguments":{"hints":["Calculator","计算器"]}}
-{"serverId":"desktop","tool":"accessibility_tree","arguments":{}}
-```
-
-**UIA control:**
-```json
-{"serverId":"desktop","tool":"accessibility_action","arguments":{"action":"invoke","name":"一"}}
-```
-
-**Keyboard / type:**
-```json
-{"serverId":"desktop","tool":"key","arguments":{"key":"enter"}}
-{"serverId":"desktop","tool":"type","arguments":{"text":"1+1"}}
-```
-
-**Enter computer-use mode (multi-step vision + UIA loop):**
+**Multi-step UI (preferred — enter Computer Use mode):**
 ```json
 {"serverId":"desktop","tool":"computer_use","arguments":{"goal":"打开计算器并计算 1+1"}}
 ```
-This enqueues the full executor computer-use session (screenshot + accessibility tree each step). Use it for multi-step UI work; use atomic tools for short single actions.
+Runtime injects screenshot + UIA tree every step inside the mode.
+
+**Single short open only (no further UI work):**
+```json
+{"serverId":"desktop","tool":"launch","arguments":{"app":"calc"}}
+```
+Known `app` ids: `notepad`, `calc`/`calculator`, `explorer`, `cmd`, `powershell`, `browser`, `settings`, `paint`, `snippingtool`.
 
 ### After tools
 

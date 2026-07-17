@@ -1,6 +1,6 @@
 <script lang="ts">
   import {onMount, tick} from 'svelte';
-  import {BellRing, MessageCircleMore, Layers3, Zap, Send, Settings, Plus, Paperclip, ArrowUp, Search, Minus, Maximize2, X, Trash2, MessagesSquare, Workflow, Wrench, FolderGit2} from 'lucide-svelte';
+  import {BellRing, MessageCircleMore, Layers3, Send, Settings, Plus, Paperclip, ArrowUp, ArrowRight, Search, Minus, Maximize2, X, Trash2, MessagesSquare, Workflow, Wrench, FolderGit2, Target, ListTodo, ShieldCheck, ChevronDown} from 'lucide-svelte';
   import StatusDot from './lib/StatusDot.svelte';
   import Oobe from './lib/Oobe.svelte';
   import QuickWindow from './lib/QuickWindow.svelte';
@@ -8,7 +8,8 @@
   import PageHeader from './lib/PageHeader.svelte';
   import SettingsView from './lib/SettingsView.svelte';
   import MemoryEditor from './lib/MemoryEditor.svelte';
-  import TasksView from './lib/TasksView.svelte';
+  import GoalsView from './lib/GoalsView.svelte';
+  import SessionAgentDocks from './lib/SessionAgentDocks.svelte';
   import ProactiveView from './lib/ProactiveView.svelte';
   import ChannelsView from './lib/ChannelsView.svelte';
   import ConversationsView from './lib/ConversationsView.svelte';
@@ -20,6 +21,8 @@
   import type {ChatMessage, Conversation, FileNode, MemoryCategory, MemoryItem, ModelSetup, Persona, Project, Theme, ViewId} from './lib/types';
   import {categoryFromWire, categoryToWire, importanceStars, normalizeConversation, normalizeProject} from './lib/types';
   import {formatRuntimeError, runtime} from './lib/runtime';
+  import {bindProactiveNotificationActions, showProactiveSystemNotification} from './lib/proactiveNotify';
+  import SlashMenu from './lib/SlashMenu.svelte';
   import {routeUserMessage, shouldTransferToExecutor, taskTitleFromText} from '@pattern/core';
 
   const nav = [
@@ -27,7 +30,7 @@
     {id: 'project', label: '项目', icon: FolderGit2},
     {id: 'conversations', label: '管理', icon: MessagesSquare},
     {id: 'memory', label: '记忆', icon: Layers3},
-    {id: 'tasks', label: '任务', icon: Zap},
+    {id: 'goals', label: '目标', icon: Target},
     {id: 'proactive', label: '主动', icon: BellRing},
     {id: 'workflows', label: '技能', icon: Workflow},
     {id: 'mcp', label: '工具', icon: Wrench},
@@ -65,12 +68,41 @@
   let lastConsolidateAt = $state<number | null>(null);
   let memorySearchTimer: ReturnType<typeof setTimeout>;
   let taskDraft = $state<{title: string; detail: string; nonce: number} | null>(null);
+  let sessionPlanCollapsed = $state(false);
+  let sessionGoalCollapsed = $state(false);
+  let sessionLoopCollapsed = $state(false);
+  let sessionRemindCollapsed = $state(false);
   let attachmentInput = $state<HTMLInputElement>();
+  let composerDragOver = $state(false);
   let agentState = $state<'idle' | 'thinking' | 'executing' | 'paused' | 'approval'>('idle');
   let activeSlot = $state<'companion' | 'executor'>('companion');
   // When enabled, desktop-action turns may spawn/internalize a sub-agent worker.
   // When disabled, primary agent still acts (tools/desktop) but does not spawn sub-agents.
   let allowSubAgents = $state(typeof localStorage === 'undefined' ? true : localStorage.getItem('pattern-allow-sub-agents') !== '0');
+  type ComposerMode = 'goal' | 'plan' | null;
+  type ApprovalPreset = 'all' | 'changes' | 'sensitive' | 'unrestricted';
+  type SkillOption = {id: string; name: string; description: string};
+  type ModelProfile = {id: string; name: string; provider: string; endpoint: string; model: string; models?: string[]; executorProvider?: string; executorEndpoint?: string; executorModel?: string; executorVision?: boolean};
+  type ModelMetric = {model: string; provider: string; inputTokens: number; outputTokens: number; cachedTokens: number; requests: number; contextWindow?: number; lastRequest?: {inputTokens: number; outputTokens: number; cachedTokens: number; durationMs?: number; at: number}};
+  const approvalOptions: Array<{id: ApprovalPreset; label: string; detail: string; autoApproveBelow: number; hardDenyAt: number}> = [
+    {id: 'all', label: '全部需要审批', detail: '每一步都先询问', autoApproveBelow: 0, hardDenyAt: 4},
+    {id: 'changes', label: '自动接收修改', detail: '常规修改直接执行', autoApproveBelow: 3, hardDenyAt: 4},
+    {id: 'sensitive', label: '只审批敏感命令', detail: '外发、安装和破坏性操作确认', autoApproveBelow: 2, hardDenyAt: 3},
+    {id: 'unrestricted', label: '完全放行', detail: '不弹审批，仍保留审计', autoApproveBelow: 4, hardDenyAt: 4},
+  ];
+  let composerMode = $state<ComposerMode>(null);
+  let showModePicker = $state(false);
+  let selectedSkillIds = $state<string[]>([]);
+  let availableSkills = $state<SkillOption[]>([]);
+  let showSkillPicker = $state(false);
+  let approvalPreset = $state<ApprovalPreset>(typeof localStorage === 'undefined' ? 'sensitive' : (localStorage.getItem('pattern-approval-preset') as ApprovalPreset) || 'sensitive');
+  let showApprovalPicker = $state(false);
+  let modelProfiles = $state<ModelProfile[]>([]);
+  let activeModelProfileId = $state('');
+  let activeModel = $state('');
+  let showModelPicker = $state(false);
+  let modelSearch = $state('');
+  let modelMetrics = $state<ModelMetric[]>([]);
   let showProjectDialog = $state(false);
   let projectNameDraft = $state('');
   let projectPathDraft = $state('');
@@ -94,6 +126,17 @@
 
   const activeConversation = $derived(conversations.find((item) => item.id === activeConversationId) || null);
   const activeProject = $derived(projects.find((item) => item.id === activeProjectId) || null);
+  const selectedSkills = $derived(availableSkills.filter((skill) => selectedSkillIds.includes(skill.id)));
+  const approvalLabel = $derived(approvalOptions.find((item) => item.id === approvalPreset)?.label || '只审批敏感命令');
+  const activeMetric = $derived(modelMetrics.find((item) => item.model === activeModel) || modelMetrics[0] || null);
+  const activeContextRatio = $derived(activeMetric?.contextWindow ? Math.min(100, Math.round(((activeMetric.inputTokens + activeMetric.outputTokens) / activeMetric.contextWindow) * 100)) : 0);
+  const activeModelProfile = $derived(modelProfiles.find((profile) => profile.id === activeModelProfileId) || null);
+  const composerModeLabel = $derived(composerMode === 'goal' ? '目标' : composerMode === 'plan' ? '计划' : '常规');
+  const quickModelEntries = $derived(modelProfiles.flatMap((profile) => {
+    if (!profile.provider?.trim() || !profile.endpoint?.trim()) return [];
+    const models = [...new Set([...(profile.models || []), profile.model].filter((item): item is string => !!item?.trim()))];
+    return models.map((model) => ({profile, model}));
+  }).filter((item) => `${item.profile.name} ${modelProviderLabel(item.profile)} ${item.model}`.toLowerCase().includes(modelSearch.trim().toLowerCase())));
   const showRecents = $derived(activeView === 'chat' || activeView === 'conversations');
   const homeGreeting = $derived.by(() => {
     const hour = new Date(clock).getHours();
@@ -244,18 +287,48 @@
     messages = [...messages];
   }
 
+  function taskStepKind(action?: string): string {
+    const a = String(action || '').toLowerCase();
+    if (a === 'mcp') return 'mcp';
+    if (['key', 'type', 'click', 'scroll', 'launch', 'focus', 'screenshot', 'foreground', 'uiainvoke', 'uiasetvalue', 'computer_use', 'wait', 'done', 'fail'].includes(a) || a.startsWith('uia')) return 'tool';
+    return 'task';
+  }
+
+  function attachTaskCardToMessage(message: any, task: any) {
+    message.taskCard = {
+      taskId: task.id,
+      title: task.title || message.taskCard?.title || '桌面执行',
+      status: task.status || message.taskCard?.status || 'running',
+      detail: task.detail || message.taskCard?.detail || '',
+    };
+  }
+
   function syncTaskTimeline(task: any) {
     const conversationId = task.conversationId || activeConversationId;
     const taskConversation = conversationId && conversationId !== activeConversationId
       ? conversations.find((item) => item.id === conversationId)
       : null;
     const messageList = taskConversation ? taskConversation.messages : messages;
-    const target = [...messageList].reverse().find((m) => m.role === 'assistant' && m.taskCard?.taskId === task.id);
+    let target = [...messageList].reverse().find((m) => m.role === 'assistant' && m.taskCard?.taskId === task.id);
+    // Fallback: latest assistant bubble linked by computer_use receipt/event (often no pre-bound taskCard).
+    if (!target) {
+      target = [...messageList].reverse().find((m) =>
+        m.role === 'assistant' && (
+          !m.taskCard ||
+          m.taskCard.taskId === task.id ||
+          (m.events || []).some((event: any) =>
+            event.taskId === task.id ||
+            String(event.action || '').includes('computer_use') ||
+            String(event.receipt || '').includes(task.id),
+          )
+        ),
+      );
+    }
     if (!target) return;
-    target.taskCard = {...target.taskCard!, status: task.status, title: task.title, detail: task.detail || target.taskCard?.detail};
+    attachTaskCardToMessage(target, task);
     const steps = Array.isArray(task.steps) ? task.steps : [];
     for (const step of steps) {
-      pushMessageEvent(target.id, step.action === 'mcp' ? 'mcp' : 'task', step.detail || step.action || '步骤', {
+      pushMessageEvent(target.id, taskStepKind(step.action), step.detail || step.action || '步骤', {
         id: step.id,
         stepId: step.id,
         taskId: task.id,
@@ -510,7 +583,7 @@
 
   function isUserBusy() {
     if (replying || agentState === 'thinking' || agentState === 'executing' || agentState === 'approval') return true;
-    if (document.visibilityState === 'visible' && (activeView === 'project' || activeView === 'tasks')) return true;
+    if (document.visibilityState === 'visible' && activeView === 'project') return true;
     if (foregroundBusy) return true;
     return false;
   }
@@ -606,7 +679,27 @@
     const exists = proactiveInbox.some((entry) => entry.id === item.id);
     proactiveInbox = [item, ...proactiveInbox.filter((entry) => entry.id !== item.id)].slice(0, 100);
     if (!exists) proactiveCount += 1;
-    notify(`${item.origin === 'system' ? '系统提醒' : 'AI 主动消息'}已进入收件箱`);
+    // Prefer OS notification (no quick-window popup). Toast click / action opens main chat to reply.
+    void showProactiveSystemNotification(item).then((ok) => {
+      if (!ok) notify(`${item.origin === 'system' ? '系统提醒' : 'AI 主动消息'}已进入收件箱`);
+    });
+  }
+
+  /** Reply to a proactive impulse from a system-notification action (or after opening it). */
+  async function replyToProactiveFromNotification(
+    item: {id: string; body: string; type?: string; reason?: string; origin?: 'ai' | 'system'; chainId?: string},
+    text: string,
+  ) {
+    const value = text.trim();
+    if (!value) {
+      await openProactiveInboxItem(item);
+      return;
+    }
+    await openProactiveInboxItem(item);
+    await tick();
+    draft = value;
+    await tick();
+    await sendMessage();
   }
 
   function proactiveTitle(item: {body: string; type?: string; reason?: string; origin?: 'ai' | 'system'}) {
@@ -803,9 +896,33 @@
     void syncProjectsToSidecar();
 
     if ((window as any).__TAURI_INTERNALS__) {
+      void bindProactiveNotificationActions({
+        onOpen: (item) => openProactiveInboxItem(item),
+        onReply: (item, text) => replyToProactiveFromNotification(item, text),
+        onDismiss: (item) => dismissProactiveInboxItem(item),
+      });
       try {
         const {invoke} = await import('@tauri-apps/api/core');
         persona = await invoke<Persona | null>('load_persona');
+        const modelConfig = await invoke<(ModelSetup & {profileId?: string; connections?: Array<{id: string; name?: string; provider: string; endpoint: string; models?: string[]}>}) | null>('load_model_config');
+        try {
+          const storedProfiles = JSON.parse(localStorage.getItem('pattern-model-profiles') || '{}');
+          if (Array.isArray(storedProfiles.profiles)) modelProfiles = storedProfiles.profiles.map((profile: ModelProfile) => ({...profile, provider: modelProviderLabel(profile), models: [...new Set([...(profile.models || []), profile.model].filter(Boolean))]}));
+          if (typeof storedProfiles.activeProfileId === 'string') activeModelProfileId = storedProfiles.activeProfileId;
+        } catch { /* optional profile directory */ }
+        if (modelConfig) {
+          activeModel = modelConfig.model;
+          activeModelProfileId = modelConfig.profileId || activeModelProfileId || 'default';
+          if (!modelProfiles.length) {
+            const connections = (modelConfig.connections || []).filter((item) => item.provider?.trim() && item.endpoint?.trim());
+            modelProfiles = connections.length
+              ? connections.map((connection) => {
+                  const models = [...new Set((connection.models || []).concat(connection.id === activeModelProfileId ? [modelConfig.model] : []).filter(Boolean))];
+                  return {id: connection.id, name: connection.name || `${modelProviderLabel(connection)} · ${models[0] || '模型服务'}`, provider: modelProviderLabel(connection), endpoint: connection.endpoint, model: connection.id === activeModelProfileId ? modelConfig.model : models[0] || '', models};
+                })
+              : [{id: activeModelProfileId, name: `${modelProviderLabel(modelConfig)} · ${modelConfig.model}`, provider: modelProviderLabel(modelConfig), endpoint: modelConfig.endpoint, model: modelConfig.model, models: [modelConfig.model]}];
+          }
+        }
         const workspaceState = await invoke<{conversations?: Conversation[]; projects?: Project[]} | null>('load_workspace_state');
         if (workspaceState?.conversations?.length) {
           conversations = workspaceState.conversations.map((item) => normalizeConversation(item));
@@ -829,12 +946,16 @@
         console.error(error);
       }
       runtimeConnected = await runtime.connect();
+      void refreshModelStatus();
       runtime.onStatus((connected) => {
         runtimeConnected = connected;
+        if (connected) void refreshModelStatus();
       });
       runtime.on((message) => {
         if (message.type === 'memory.changed') void refreshMemories();
         if (message.type === 'memory.proposed') memoryProposals = message.items || [];
+        if (message.type === 'skill.updated' && Array.isArray(message.skills)) availableSkills = message.skills;
+        if (message.type === 'model.metrics' && Array.isArray(message.metrics)) modelMetrics = message.metrics;
         if (message.type === 'runtime.agent_state') agentState = message.state;
         if (message.type === 'task.updated') {
           if (message.task.status === 'running') agentState = 'executing';
@@ -858,10 +979,8 @@
           }
         }
         if (message.type === 'proactive.impulse') {
+          // System notification only — do not open the quick window for proactive messages.
           ingestProactiveImpulse(message.item);
-          if ((window as any).__TAURI_INTERNALS__) {
-            import('@tauri-apps/api/core').then(({invoke}) => invoke('show_quick')).catch(() => {});
-          }
         }
         if (message.type === 'proactive.inbox.updated') {
           proactiveInbox = [message.item, ...proactiveInbox.filter((item) => item.id !== message.item.id)].slice(0, 100);
@@ -870,8 +989,10 @@
       await refreshMemories();
     } else {
       runtimeConnected = await runtime.connect();
+      void refreshModelStatus();
       runtime.onStatus((connected) => {
         runtimeConnected = connected;
+        if (connected) void refreshModelStatus();
       });
       runtime.on((message) => {
         if (message.type === 'proactive.impulse') ingestProactiveImpulse(message.item);
@@ -971,6 +1092,156 @@
       /* ignore */
     }
     notify(next ? '已启用子 Agent：主 Agent 可派生子代理处理复杂工作' : '已关闭子 Agent：主 Agent 自己调用工具并执行');
+  }
+
+  function setComposerMode(next: ComposerMode) {
+    composerMode = composerMode === next ? null : next;
+    showModePicker = false;
+    if (composerMode) showSkillPicker = false;
+  }
+
+  function toggleModePicker() {
+    showModePicker = !showModePicker;
+    showSkillPicker = false;
+    showApprovalPicker = false;
+    showModelPicker = false;
+  }
+
+  function normalizeComposerSlash() {
+    const match = draft.match(/^\/(goal|plan|skill)\b\s*/i);
+    if (!match) return;
+    const command = match[1].toLowerCase();
+    draft = draft.slice(match[0].length);
+    if (command === 'skill') void toggleSkillPicker(true);
+    else setComposerMode(command as Exclude<ComposerMode, null>);
+  }
+
+  async function toggleSkillPicker(forceOpen = false) {
+    showSkillPicker = forceOpen || !showSkillPicker;
+    showApprovalPicker = false;
+    if (!showSkillPicker || availableSkills.length || !(await runtime.connect())) return;
+    try {
+      const result = await runtime.request<any>({type: 'skill.list', id: crypto.randomUUID()});
+      if (result.type === 'skill.list.result') availableSkills = result.skills || [];
+    } catch (error) {
+      notify(`读取技能失败：${formatRuntimeError(error)}`);
+    }
+  }
+
+  function toggleSkill(id: string) {
+    selectedSkillIds = selectedSkillIds.includes(id)
+      ? selectedSkillIds.filter((item) => item !== id)
+      : [...selectedSkillIds, id];
+  }
+
+  function buildComposerMessage(value: string) {
+    const skillMentions = selectedSkills.map((skill) => `@skill:${skill.id}`).join(' ');
+    const body = [skillMentions, value].filter(Boolean).join(' ').trim();
+    if (composerMode === 'goal') return `/goal ${body}`;
+    if (composerMode === 'plan') return `/plan ${body}`;
+    return body;
+  }
+
+  async function setApprovalPreset(next: ApprovalPreset) {
+    const option = approvalOptions.find((item) => item.id === next);
+    if (!option) return;
+    approvalPreset = next;
+    showApprovalPicker = false;
+    try {
+      localStorage.setItem('pattern-approval-preset', next);
+      if (await runtime.connect()) {
+        await runtime.request<any>({
+          type: 'security.policy.set',
+          id: crypto.randomUUID(),
+          policy: {autoApproveBelow: option.autoApproveBelow, hardDenyAt: option.hardDenyAt},
+        } as any);
+      }
+      notify(`审批策略：${option.label}`);
+    } catch (error) {
+      notify(`保存审批策略失败：${formatRuntimeError(error)}`);
+    }
+  }
+
+  function modelChoicesForProvider(provider: string, current = '') {
+    const value = provider.toLowerCase();
+    const presets = value.includes('anthropic')
+      ? ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5']
+      : value.includes('deepseek')
+        ? ['deepseek-v4-pro', 'deepseek-v4-flash']
+        : value.includes('qwen') || value.includes('百炼')
+          ? ['qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash']
+          : value.includes('智谱') || value.includes('zhipu')
+            ? ['glm-5.1', 'glm-5v-turbo', 'glm-4.7']
+            : ['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'];
+    return [...new Set([current, ...presets].filter(Boolean))];
+  }
+
+  function modelProviderLabel(profile: Pick<ModelProfile, 'provider' | 'endpoint'>) {
+    const endpoint = profile.endpoint.toLowerCase();
+    if (['OpenAI Compatible', 'OpenAI'].includes(profile.provider)) {
+      if (endpoint.includes('deepseek')) return 'DeepSeek';
+      if (endpoint.includes('anthropic')) return 'Anthropic Compatible';
+      if (endpoint.includes('openrouter')) return 'OpenRouter';
+      if (endpoint.includes('dashscope') || endpoint.includes('aliyuncs') || endpoint.includes('bailian')) return '阿里云百炼 / Qwen';
+      if (endpoint.includes('bigmodel') || endpoint.includes('zhipu')) return '智谱 AI';
+    }
+    return profile.provider;
+  }
+
+  function formatTokenCount(value?: number) {
+    const amount = Number(value || 0);
+    if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+    if (amount >= 1_000) return `${(amount / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
+    return amount.toLocaleString('en-US');
+  }
+
+  async function refreshModelStatus() {
+    if (!(await runtime.connect())) return;
+    try {
+      const result = await runtime.request<any>({type: 'model.metrics.get', id: crypto.randomUUID()});
+      if (result.type === 'model.metrics') modelMetrics = result.metrics || [];
+    } catch {
+      /* The status indicator remains quiet while the runtime is reconnecting. */
+    }
+  }
+
+  async function switchQuickModel(profile: ModelProfile, model: string) {
+    activeModelProfileId = profile.id;
+    activeModel = model;
+    showModelPicker = false;
+    const nextProfiles = modelProfiles.map((item) => item.id === profile.id ? {...item, model, models: [...new Set([...(item.models || []), model])]} : item);
+    modelProfiles = nextProfiles;
+    localStorage.setItem('pattern-model-profiles', JSON.stringify({activeProfileId: profile.id, profiles: nextProfiles}));
+    if (!(window as any).__TAURI_INTERNALS__) {
+      notify(`已切换模型：${model}`);
+      return;
+    }
+    try {
+      const {invoke} = await import('@tauri-apps/api/core');
+      await invoke('save_model_config', {
+        config: {
+          provider: modelProviderLabel(profile),
+          endpoint: profile.endpoint,
+          model,
+          profileId: profile.id,
+          connections: nextProfiles.map((item) => ({id: item.id, name: item.name, provider: modelProviderLabel(item), endpoint: item.endpoint, models: [...new Set([...(item.models || []), item.model].filter(Boolean))], enabled: true})),
+          agentProvider: modelProviderLabel(profile),
+          agentEndpoint: profile.endpoint,
+          agentModel: model,
+          executorProvider: profile.executorProvider || modelProviderLabel(profile),
+          executorEndpoint: profile.executorEndpoint || profile.endpoint,
+          executorModel: profile.executorModel || '',
+          executorVision: profile.executorVision !== false,
+        },
+        apiKey: null,
+        executorApiKey: null,
+        agentApiKey: null,
+      });
+      await refreshModelStatus();
+      notify(`已切换到 ${profile.name} · ${model}`);
+    } catch (error) {
+      notify(`切换模型失败：${formatRuntimeError(error)}`);
+    }
   }
 
   function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
@@ -1243,7 +1514,7 @@
         role: 'assistant',
         text: ['done', 'failed', 'cancelled'].includes(status)
           ? status === 'done' ? `已完成：${title}` : status === 'failed' ? `执行失败：${title}\n\n${createdTask?.error || '没有可用的错误详情'}` : `已终止：${title}`
-          : `好的，我来处理：${title}\n已开始桌面执行，进度会同步在这条对话里。`,
+          : `好的，我来处理：${title}\n已进入 computer-use 模式（每步自动注入 UIA 控件树 + 截图）。进度会同步在这条对话里。`,
         time,
         taskCard: {taskId, title, status, detail},
         events: [{id: crypto.randomUUID(), stepId: `task:${taskId}:status`, kind: 'task', text: `执行状态 · ${status}`, ts: Date.now(), status: status === 'running' ? 'running' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'pending', taskId}],
@@ -1252,7 +1523,7 @@
     }
     // Stay in chat by default. Tasks page is only for inspection/management.
     if (options.openTasks) activeView = 'tasks';
-    notify('主 Agent 已开始执行');
+    notify('已进入 computer-use 模式');
     if (options.openReview && (window as any).__TAURI_INTERNALS__) {
       const {invoke} = await import('@tauri-apps/api/core');
       try {
@@ -1285,16 +1556,17 @@
   }
 
   async function sendMessage() {
-    const textValue = draft.trim();
-    if (!textValue || replying) return;
+    const displayText = draft.trim();
+    const textValue = buildComposerMessage(displayText);
+    if (!displayText || replying) return;
     if (editingMessageId) {
       const editIndex = messages.findIndex((message) => message.id === editingMessageId && message.role === 'user');
       if (editIndex >= 0) messages = messages.slice(0, editIndex);
       editingMessageId = '';
     }
-    // Desktop work always belongs to the primary agent.
-    // Sub-agents are optional workers that can be spawned only when enabled.
-    if (allowSubAgents && shouldTransferToExecutor(textValue)) {
+    // Multi-step desktop work enters Computer Use mode (primary agent owns it).
+    // allowSubAgents must NOT block mode entry — it only affects worker-model preference.
+    if (shouldTransferToExecutor(textValue)) {
       draft = '';
       await createExecutorTask(textValue);
       return;
@@ -1324,7 +1596,9 @@
     const history = messages.map((message) => ({role: message.role, content: message.text}));
     const time = new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
     lastUserText = textValue;
-    messages.push({id: crypto.randomUUID(), role: 'user', text: textValue, time});
+    // Keep slash transport syntax out of the visible conversation. The active mode is
+    // represented by the composer chip instead of a raw /goal or /plan message.
+    messages.push({id: crypto.randomUUID(), role: 'user', text: displayText, time});
     draft = '';
     replying = true;
     agentState = 'thinking';
@@ -1358,8 +1632,8 @@
           text: textValue,
           history,
           sessionId: activeConversationId || 'current',
-          // Primary agent stays in chat; only spawn executor worker when sub-agents are enabled.
-          slot: allowSubAgents && decision.slot === 'executor' ? 'executor' : 'companion',
+          // Let sidecar re-classify; still pass decision hint for desktop multi-step.
+          slot: decision.slot,
           allowSubAgents,
           workspace,
           projectName,
@@ -1368,22 +1642,55 @@
         {
           onDelta: (delta) => {
             if (streamingId !== id) return;
-            const target = messages.find((message) => message.id === id);
-            if (target) {
-              target.text += delta;
-              // Reassign so Svelte reliably re-renders streaming markdown body.
+            const index = messages.findIndex((message) => message.id === id);
+            if (index >= 0) {
+              const current = messages[index];
+              // Immutable update so MessageContent markdown $derived always sees new text.
+              messages[index] = {...current, text: (current.text || '') + delta};
               messages = messages;
             }
-            tick().then(scrollToBottom);
+            tick().then(() => scrollToBottom());
           },
           onEvent: (event) => {
-            // Allow late events (e.g. memory) only while this stream is still active.
-            if (streamingId !== id) return;
+            // Stream-local events while active; also accept late computer-use/task linkage for this bubble.
+            const lateTask = !!(event as any).taskId || /computer_use|taskId/i.test(String((event as any).receipt || '') + String((event as any).action || ''));
+            if (streamingId !== id && !lateTask) return;
             const kind = event.kind || 'status';
             const status =
               event.status ||
               (kind === 'error' ? 'failed' : kind === 'memory' || kind === 'workspace' || kind === 'status' ? 'done' : 'running');
-            pushMessageEvent(id, kind, event.text, {id: event.id, stepId: event.id, status, action: (event as any).action, receipt: (event as any).receipt, ts: event.ts || Date.now()});
+            const receipt = (event as any).receipt as string | undefined;
+            const action = (event as any).action as string | undefined;
+            let taskId = (event as any).taskId as string | undefined;
+            if (!taskId && receipt) {
+              try {
+                const parsed = JSON.parse(receipt);
+                if (parsed?.taskId) taskId = String(parsed.taskId);
+                if (parsed?.mode === 'computer_use' || action === 'desktop.computer_use' || action === 'computer_use') {
+                  const target = messages.find((message) => message.id === id);
+                  if (target && parsed?.taskId) {
+                    target.taskCard = {
+                      taskId: String(parsed.taskId),
+                      title: String(parsed.title || '桌面执行'),
+                      status: String(parsed.status || 'queued'),
+                      detail: String(parsed.message || parsed.goal || ''),
+                    };
+                    messages = messages;
+                  }
+                }
+              } catch {
+                /* non-JSON receipt */
+              }
+            }
+            pushMessageEvent(id, kind === 'status' && action ? 'tool' : kind, event.text, {
+              id: event.id,
+              stepId: event.id,
+              status,
+              action,
+              receipt,
+              taskId,
+              ts: event.ts || Date.now(),
+            });
           },
           onDone: () => {
             // Even if the user already stopped (streamingId cleared), still finalize the bubble.
@@ -1454,16 +1761,119 @@
     }
   }
 
-  async function attachFile(event: Event) {
-    const file = (event.currentTarget as HTMLInputElement).files?.[0];
-    if (!file) return;
-    if (file.size > 64 * 1024) { notify('附件大于 64KB，请通过「文件感知」监视该目录'); return; }
+  async function attachBrowserFile(file: File) {
+    if (file.size > 64 * 1024) {
+      notify(`附件 ${file.name} 大于 64KB，请通过「文件感知」监视该目录或附加项目路径`);
+      return false;
+    }
     try {
       const content = await file.text();
-      draft = `${draft ? `${draft}\n\n` : ''}[用户主动附上文件：${file.name}]\n${content.slice(0, 60_000)}`;
+      draft = `${draft ? `${draft}
+
+` : ''}[用户主动附上文件：${file.name}]
+${content.slice(0, 60_000)}`;
       notify(`已附加 ${file.name}`);
-    } catch { notify('该文件无法以文本读取'); }
-    (event.currentTarget as HTMLInputElement).value = '';
+      return true;
+    } catch {
+      notify(`该文件无法以文本读取：${file.name}`);
+      return false;
+    }
+  }
+
+  async function attachPathFromDisk(path: string) {
+    const clean = path.trim().replace(/^file:\/\//i, '');
+    if (!clean) return false;
+    const name = clean.split(/[/\\]/).pop() || clean;
+    if (!(window as any).__TAURI_INTERNALS__) {
+      notify('浏览器预览无法读取本地路径，请使用点选附加');
+      return false;
+    }
+    try {
+      const {invoke} = await import('@tauri-apps/api/core');
+      const content = await invoke<string>('read_text_file', {path: clean, maxBytes: 64_000});
+      if (!attachedPaths.includes(clean)) attachedPaths = [...attachedPaths, clean];
+      draft = `${draft ? `${draft}
+
+` : ''}[已附加文件：${name}]
+${content}`;
+      notify(`已读取并附加 ${name}`);
+      return true;
+    } catch (error) {
+      notify(`附加失败：${name} · ${error}`);
+      return false;
+    }
+  }
+
+  async function attachFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = input.files ? Array.from(input.files) : [];
+    for (const file of files.slice(0, 5)) {
+      await attachBrowserFile(file);
+    }
+    input.value = '';
+  }
+
+  function extractDroppedPaths(event: DragEvent): string[] {
+    const dt = event.dataTransfer;
+    if (!dt) return [];
+    const paths: string[] = [];
+    // Tauri / Chromium may expose absolute paths on File
+    if (dt.files?.length) {
+      for (const file of Array.from(dt.files)) {
+        const anyFile = file as File & {path?: string};
+        if (anyFile.path) paths.push(anyFile.path);
+      }
+    }
+    // Fallback: text/uri-list or plain path text
+    const uriList = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
+    for (const line of uriList.split(/\r?\n/)) {
+      const item = line.trim();
+      if (!item || item.startsWith('#')) continue;
+      if (item.startsWith('file:')) {
+        try {
+          paths.push(decodeURIComponent(item.replace(/^file:\/\//i, '').replace(/^\/([A-Za-z]:)/, '$1')));
+        } catch {
+          paths.push(item);
+        }
+      } else if (/^[A-Za-z]:[\\/]/.test(item) || item.startsWith('/')) {
+        paths.push(item);
+      }
+    }
+    return [...new Set(paths)];
+  }
+
+  async function onComposerDragOver(event: DragEvent) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    composerDragOver = true;
+  }
+
+  function onComposerDragLeave(event: DragEvent) {
+    const current = event.currentTarget as HTMLElement;
+    const related = event.relatedTarget as Node | null;
+    if (related && current.contains(related)) return;
+    composerDragOver = false;
+  }
+
+  async function onComposerDrop(event: DragEvent) {
+    event.preventDefault();
+    composerDragOver = false;
+    const paths = extractDroppedPaths(event);
+    if (paths.length) {
+      let ok = 0;
+      for (const path of paths.slice(0, 8)) {
+        if (await attachPathFromDisk(path)) ok += 1;
+      }
+      if (ok) return;
+    }
+    const files = event.dataTransfer?.files ? Array.from(event.dataTransfer.files) : [];
+    if (!files.length) {
+      notify('未能识别拖入的文件');
+      return;
+    }
+    for (const file of files.slice(0, 5)) {
+      await attachBrowserFile(file);
+    }
   }
 
   async function windowAction(action: 'minimize' | 'maximize' | 'close') {
@@ -1575,6 +1985,20 @@
               <button class="quiet-button" onclick={() => newChat('global')}><Plus size={14} />新对话</button>
             </div>
           </div>
+          <SessionAgentDocks
+            conversationId={activeConversationId}
+            planCollapsed={sessionPlanCollapsed}
+            goalCollapsed={sessionGoalCollapsed}
+            loopCollapsed={sessionLoopCollapsed}
+            remindCollapsed={sessionRemindCollapsed}
+            onTogglePlan={() => (sessionPlanCollapsed = !sessionPlanCollapsed)}
+            onToggleGoal={() => (sessionGoalCollapsed = !sessionGoalCollapsed)}
+            onToggleLoop={() => (sessionLoopCollapsed = !sessionLoopCollapsed)}
+            onToggleRemind={() => (sessionRemindCollapsed = !sessionRemindCollapsed)}
+            onOpenGoals={() => goToView('goals')}
+            onOpenTasks={() => goToView('chat')}
+            onOpenProactive={() => goToView('proactive')}
+          />
           <div class="chat-stream" bind:this={stream}>
             <div class="day-divider"><span>{new Date().toLocaleDateString('zh-CN', {month: 'long', day: 'numeric', weekday: 'short'})}</span></div>
             {#if !messages.length}
@@ -1612,16 +2036,65 @@
           </div>
           <form
             class="composer"
+            class:drag-over={composerDragOver}
             onsubmit={(e) => {
               e.preventDefault();
               sendMessage();
             }}
+            ondragenter={onComposerDragOver}
+            ondragover={onComposerDragOver}
+            ondragleave={onComposerDragLeave}
+            ondrop={onComposerDrop}
           >
+            {#if composerDragOver}
+              <div class="composer-drop-hint" aria-hidden="true">松开以附加文件到对话</div>
+            {/if}
             {#if editingMessageId}
               <div class="composer-editing"><span>正在编辑较早的消息，发送后将从这里继续。</span><button type="button" onclick={cancelMessageEdit}>取消</button></div>
             {/if}
-            <textarea aria-label="消息" bind:value={draft} onkeydown={keydown} rows="2" placeholder={`和 ${persona?.name || 'Pattern'} 说点什么……`}></textarea>
+            {#if attachedPaths.length}
+              <div class="composer-attachments" aria-label="已附加路径">
+                {#each attachedPaths as path (path)}
+                  <span class="composer-chip" title={path}>
+                    {path.split(/[/\\]/).pop() || path}
+                    <button type="button" aria-label={`移除 ${path}`} onclick={() => (attachedPaths = attachedPaths.filter((item) => item !== path))}>×</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+            {#if draft.startsWith('/') && !draft.includes('\n')}
+              <SlashMenu
+                query={draft}
+                onPick={(command) => {
+                  draft = command.startsWith('/') ? command : `/${command}`;
+                }}
+              />
+            {:else if /(?:^|\s)@[\w\u4e00-\u9fff:-]*$/.test(draft)}
+              <div class="at-menu" aria-label="@ 引用建议">
+                {#each ['@skill:', '@workflow:', '@task:', '@project:'] as hint}
+                  <button
+                    type="button"
+                    class="at-chip"
+                    onclick={() => {
+                      draft = draft.replace(/(^|\s)@[\w\u4e00-\u9fff:-]*$/, `$1${hint}`);
+                    }}
+                  >{hint}</button>
+                {/each}
+              </div>
+            {/if}
+            {#if composerMode}
+              <div class="composer-mode-hint" class:plan={composerMode === 'plan'}>
+                {#if composerMode === 'goal'}<Target size={14} />{:else}<ListTodo size={14} />{/if}
+                <strong>{composerMode === 'goal' ? '目标模式' : '计划模式'}</strong>
+                <span>{composerMode === 'goal' ? '描述一个可验证的结果；发送后会持续显示在本对话。' : '用换行列出步骤；发送后会成为本对话待办。'}</span>
+                <button type="button" aria-label="退出模式" title="退出模式" onclick={() => (composerMode = null)}><X size={13} /></button>
+              </div>
+            {/if}
+            <textarea aria-label="消息" bind:value={draft} oninput={normalizeComposerSlash} onkeydown={keydown} rows="2" placeholder={composerMode === 'goal' ? '例如：完成登录页改造并验证关键流程' : composerMode === 'plan' ? '每行一个步骤，例如：\n分析当前代码\n实现界面\n运行验证' : `和 ${persona?.name || 'Pattern'} 说点什么…… 输入 / 可唤起指令`}></textarea>
             <div class="composer-actions">
+              <input aria-label="添加文件" bind:this={attachmentInput} class="file-input" type="file" onchange={attachFile} />
+              <button type="button" class="icon-action" title="添加文件（最大 64KB）" aria-label="添加文件" onclick={() => attachmentInput?.click()}><Paperclip size={14} /></button>
+              <i class="composer-divider" aria-hidden="true"></i>
               <button
                 type="button"
                 class="text-action subagent-toggle"
@@ -1632,11 +2105,88 @@
               >
                 {allowSubAgents ? '子 Agent · 开' : '子 Agent · 关'}
               </button>
-              <input aria-label="添加文件" bind:this={attachmentInput} class="file-input" type="file" onchange={attachFile} />
-              <button type="button" class="icon-action" title="添加文件（最大 64KB）" aria-label="添加文件" onclick={() => attachmentInput?.click()}><Paperclip size={14} /></button>
-              <span>{allowSubAgents ? '主 Agent · 可派生子代理' : '主 Agent · 直接工具'}</span>
+              <div class="composer-popover-anchor mode-picker-anchor">
+                <button type="button" class="composer-mode-button" class:active={showModePicker || composerMode !== null} onclick={toggleModePicker} aria-haspopup="dialog" aria-expanded={showModePicker}>
+                  {#if composerMode === 'goal'}<Target size={13} />{:else if composerMode === 'plan'}<ListTodo size={13} />{:else}<ArrowRight size={13} />{/if}
+                  <span>{composerModeLabel}</span><ChevronDown size={12} />
+                </button>
+                {#if showModePicker}
+                  <div class="composer-popover mode-picker" role="dialog" aria-label="执行方式">
+                    <header><strong>执行方式</strong><button type="button" aria-label="关闭" onclick={() => (showModePicker = false)}><X size={13} /></button></header>
+                    <button type="button" class:chosen={composerMode === null} onclick={() => setComposerMode(null)}>
+                      <span class="mode-option-icon"><ArrowRight size={16} /></span>
+                      <span><strong>常规 · 边做边推进</strong><small>边分析边执行，适合明确的日常任务。</small></span>
+                      {#if composerMode === null}<span class="skill-check">✓</span>{/if}
+                    </button>
+                    <button type="button" class:chosen={composerMode === 'plan'} onclick={() => setComposerMode('plan')}>
+                      <span class="mode-option-icon"><ListTodo size={16} /></span>
+                      <span><strong>计划 · 确认后执行</strong><small>先只读产出计划，确认后再执行。</small></span>
+                      {#if composerMode === 'plan'}<span class="skill-check">✓</span>{/if}
+                    </button>
+                    <button type="button" class:chosen={composerMode === 'goal'} onclick={() => setComposerMode('goal')}>
+                      <span class="mode-option-icon"><Target size={16} /></span>
+                      <span><strong>目标 · 持续推进</strong><small>输入目标后持续工作，直到完成或阻塞。</small></span>
+                      {#if composerMode === 'goal'}<span class="skill-check">✓</span>{/if}
+                    </button>
+                  </div>
+                {/if}
+              </div>
+              <div class="composer-popover-anchor">
+                <button type="button" class="composer-mode-button" class:active={showSkillPicker || selectedSkillIds.length > 0} onclick={() => toggleSkillPicker()}>
+                  <Workflow size={13} />技能{#if selectedSkillIds.length}<b>{selectedSkillIds.length}</b>{/if}
+                </button>
+                {#if showSkillPicker}
+                  <div class="composer-popover skill-picker" role="dialog" aria-label="调用技能">
+                    <header><strong>调用技能</strong><button type="button" aria-label="关闭" onclick={() => (showSkillPicker = false)}><X size={13} /></button></header>
+                    {#if availableSkills.length}
+                      {#each availableSkills as skill (skill.id)}
+                        <button type="button" class:chosen={selectedSkillIds.includes(skill.id)} onclick={() => toggleSkill(skill.id)}>
+                          <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
+                          {#if selectedSkillIds.includes(skill.id)}<span class="skill-check">✓</span>{/if}
+                        </button>
+                      {/each}
+                    {:else}
+                      <p>还没有可用技能，或运行时尚未连接。</p>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+              <span class="composer-presence">{selectedSkills.length ? `已调用 ${selectedSkills.map((skill) => skill.name).join('、')}` : allowSubAgents ? '主 Agent · 可派生子代理' : '主 Agent · 直接工具'}</span>
               {#if replying}<button type="button" class="quiet-button" aria-label="停止生成" onclick={stopGeneration}>停止</button>{/if}
+              <div class="composer-popover-anchor model-switch-anchor">
+                <button type="button" class="model-switch-button" title="快速切换模型" onclick={() => { showModelPicker = !showModelPicker; showSkillPicker = false; showApprovalPicker = false; }}>
+                  <span>{activeModel ? `${activeModelProfile ? modelProviderLabel(activeModelProfile) : '已配置'} · ${activeModel}` : '选择模型'}</span><ChevronDown size={12} />
+                </button>
+                {#if showModelPicker}
+                  <div class="composer-popover model-picker" role="dialog" aria-label="快速切换模型">
+                    <header><strong>快速切换模型</strong><button type="button" aria-label="关闭" onclick={() => (showModelPicker = false)}><X size={13} /></button></header>
+                    <label class="model-picker-search"><Search size={13} /><input bind:value={modelSearch} placeholder="搜索模型或供应商" /></label>
+                    {#each quickModelEntries as entry (`${entry.profile.id}:${entry.model}`)}
+                      <button type="button" class:chosen={entry.profile.id === activeModelProfileId && entry.model === activeModel} onclick={() => switchQuickModel(entry.profile, entry.model)}>
+                        <span><strong>{entry.model}</strong><small>{entry.profile.name} · {modelProviderLabel(entry.profile)}</small></span>
+                        {#if entry.profile.id === activeModelProfileId && entry.model === activeModel}<span class="skill-check">✓</span>{/if}
+                      </button>
+                    {:else}
+                      <p>还没有可切换的模型。请先在设置中添加模型服务。</p>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
               <button class="send-button" aria-label="发送" disabled={!draft.trim() || replying}><ArrowUp size={18} /></button>
+              <div class="composer-popover-anchor approval-anchor">
+                <button type="button" class="approval-button" title={`权限审批：${approvalLabel}`} aria-label="权限审批" onclick={() => { showApprovalPicker = !showApprovalPicker; showSkillPicker = false; }}><ShieldCheck size={14} /><ChevronDown size={12} /></button>
+                {#if showApprovalPicker}
+                  <div class="composer-popover approval-picker" role="dialog" aria-label="权限审批策略">
+                    <header><strong>权限审批</strong><button type="button" aria-label="关闭" onclick={() => (showApprovalPicker = false)}><X size={13} /></button></header>
+                    {#each approvalOptions as option (option.id)}
+                      <button type="button" class:chosen={approvalPreset === option.id} onclick={() => setApprovalPreset(option.id)}>
+                        <span><strong>{option.label}</strong><small>{option.detail}</small></span>
+                        {#if approvalPreset === option.id}<span class="skill-check">✓</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             </div>
           </form>
         </section>
@@ -1678,6 +2228,17 @@
             onInspectDiff={inspectProjectDiff}
             onCreateWorktree={createProjectWorktree}
             onOpenTask={openTaskReview}
+            sessionPlanCollapsed={sessionPlanCollapsed}
+            sessionGoalCollapsed={sessionGoalCollapsed}
+            sessionLoopCollapsed={sessionLoopCollapsed}
+            sessionRemindCollapsed={sessionRemindCollapsed}
+            onToggleSessionPlan={() => (sessionPlanCollapsed = !sessionPlanCollapsed)}
+            onToggleSessionGoal={() => (sessionGoalCollapsed = !sessionGoalCollapsed)}
+            onToggleSessionLoop={() => (sessionLoopCollapsed = !sessionLoopCollapsed)}
+            onToggleSessionRemind={() => (sessionRemindCollapsed = !sessionRemindCollapsed)}
+            onOpenGoals={() => goToView('goals')}
+            onOpenTasks={() => goToView('chat')}
+            onOpenProactive={() => goToView('proactive')}
           />
         {:else}
           <section class="view">
@@ -1769,10 +2330,10 @@
           onArchive={archiveConversation}
           onDelete={deleteConversation}
         />
-      {:else if activeView === 'tasks'}
-        <TasksView {notify} initialDraft={taskDraft} onDraftConsumed={() => taskDraft = null} />
+      {:else if activeView === 'goals'}
+        <GoalsView {notify} />
       {:else if activeView === 'proactive'}
-        <ProactiveView {notify} />
+        <ProactiveView {notify} onOpenTasks={() => goToView('chat')} />
       {:else if activeView === 'workflows'}
         <WorkflowsView {notify} defaultWorkspace={activeProject?.path || projects[0]?.path || ''} />
       {:else if activeView === 'mcp'}
@@ -1792,7 +2353,23 @@
       {#if foregroundTitle}<span title={foregroundTitle}>前台 <code>{foregroundTitle.slice(0, 24)}{foregroundTitle.length > 24 ? '…' : ''}</code>{foregroundBusy ? ' · 忙' : ''}</span>{/if}
       <span>记忆 <code>{memoryCount}</code> 条</span>
       <i></i>
-            <code>{activeConversation?.scope || 'global'} · primary · {agentState}</code>
+      <code>{activeConversation?.scope || 'global'} · primary · {agentState}</code>
+      <div class="model-status-indicator" aria-label="模型上下文与用量">
+        <span class="model-status-dot"></span>
+        <span>{activeModel || '未配置模型'}</span>
+        <b>{activeMetric?.contextWindow ? `${activeContextRatio}%` : '—'}</b>
+        <div class="model-status-popover">
+          <header><strong>上下文窗口</strong><span>{activeMetric?.contextWindow ? `${formatTokenCount((activeMetric.inputTokens || 0) + (activeMetric.outputTokens || 0))} / ${formatTokenCount(activeMetric.contextWindow)}` : '等待首个请求'}</span></header>
+          <div class="model-status-track"><i style={`width:${activeContextRatio}%`}></i><em style="left:80%"></em></div>
+          <dl>
+            <div><dt>已用</dt><dd>{formatTokenCount((activeMetric?.inputTokens || 0) + (activeMetric?.outputTokens || 0))}</dd></div>
+            <div><dt>距压缩</dt><dd>{activeMetric?.contextWindow ? formatTokenCount(Math.max(0, activeMetric.contextWindow - (activeMetric.inputTokens + activeMetric.outputTokens))) : '—'}</dd></div>
+            <div><dt>请求数</dt><dd>{activeMetric?.requests?.toLocaleString('en-US') || '0'}</dd></div>
+            <div><dt>缓存命中</dt><dd>{activeMetric?.inputTokens ? `${Math.round((activeMetric.cachedTokens / activeMetric.inputTokens) * 100)}%` : '—'}</dd></div>
+          </dl>
+          <footer>{activeMetric ? `${activeMetric.provider} · ${activeMetric.model}` : '模型用量会在首次响应后显示'}</footer>
+        </div>
+      </div>
     </footer>
   </main>
   {#if toast}<div class="toast show" role="status" aria-live="polite">{toast}</div>{/if}

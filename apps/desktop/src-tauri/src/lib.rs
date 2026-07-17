@@ -54,6 +54,8 @@ struct ModelConnection {
     name: String,
     provider: String,
     endpoint: String,
+    #[serde(default)]
+    models: Vec<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -534,6 +536,7 @@ fn configure_runtime(state: &RuntimeState) -> Result<(), String> {
             name: model.provider.clone(),
             provider: model.provider.clone(),
             endpoint: model.endpoint.clone(),
+            models: vec![model.model.clone()],
             enabled: true,
         }]
     } else {
@@ -623,6 +626,125 @@ fn configure_runtime(state: &RuntimeState) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve sidecar launch plan for production (bundled next to the exe) or dev monorepo.
+/// Never depends solely on compile-time CARGO_MANIFEST_DIR paths for end-user installs.
+fn resolve_sidecar_command() -> Result<(Command, String), String> {
+    let binary_name = if cfg!(windows) {
+        "pattern-sidecar.exe"
+    } else {
+        "pattern-sidecar"
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    // Production layouts (NSIS/MSI / portable copy):
+    //   <app>/resources/pattern-runtime/node.exe + index.cjs
+    //   <app>/resources/pattern-sidecar.exe
+    //   <app>/pattern-runtime/...  (same folder as exe)
+    let bundled_runtime = exe_dir.as_ref().map(|dir| dir.join("resources").join("pattern-runtime"));
+    let sibling_runtime = exe_dir.as_ref().map(|dir| dir.join("pattern-runtime"));
+    let bundled_binary = exe_dir.as_ref().map(|dir| dir.join("resources").join(binary_name));
+    let sibling_binary = exe_dir.as_ref().map(|dir| dir.join(binary_name));
+
+    // Dev monorepo paths (only used when present on this machine).
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dev_binary = manifest.join("../../../sidecar/dist").join(binary_name);
+    let dev_script = manifest.join("../../../sidecar/dist/index.cjs");
+    let dev_prod_script = manifest.join("../../../sidecar/dist/index.prod.cjs");
+    let dev_runtime = manifest.join("resources/pattern-runtime");
+
+    let configured_binary = std::env::var_os("PATTERN_SIDECAR_PATH").map(PathBuf::from);
+    let configured_node = std::env::var_os("PATTERN_NODE_PATH").map(PathBuf::from);
+    let configured_script = std::env::var_os("PATTERN_SIDECAR_SCRIPT").map(PathBuf::from);
+
+    // 1) Explicit env override (binary)
+    if let Some(path) = configured_binary.filter(|p| p.is_file()) {
+        return Ok((Command::new(path), "env-binary".into()));
+    }
+
+    // 2) Standalone compiled sidecar next to the app
+    for path in [bundled_binary, sibling_binary, Some(dev_binary)] {
+        if let Some(path) = path.filter(|p| p.is_file()) {
+            let label = format!("binary:{}", path.display());
+            return Ok((Command::new(path), label));
+        }
+    }
+
+    // 3) Portable Node pack (preferred production path — no console host if CREATE_NO_WINDOW)
+    let runtime_dirs = [
+        configured_script
+            .as_ref()
+            .and_then(|script| script.parent().map(|p| p.to_path_buf())),
+        bundled_runtime,
+        sibling_runtime,
+        Some(dev_runtime),
+    ];
+    for runtime_dir in runtime_dirs.into_iter().flatten() {
+        let node = configured_node
+            .clone()
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| runtime_dir.join(if cfg!(windows) { "node.exe" } else { "node" }));
+        let script = configured_script
+            .clone()
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| runtime_dir.join("index.cjs"));
+        if node.is_file() && script.is_file() {
+            let mut command = Command::new(node);
+            command.arg(script);
+            // Resolve better-sqlite3 relative to the pack, not the user's CWD.
+            command.current_dir(&runtime_dir);
+            return Ok((command, format!("runtime-pack:{}", runtime_dir.display())));
+        }
+    }
+
+    // 4) Dev-only: system node + monorepo script (never used in a clean VM install)
+    let script = if dev_prod_script.is_file() {
+        dev_prod_script
+    } else {
+        dev_script
+    };
+    if script.is_file() {
+        if let Ok(node) = which_node() {
+            let mut command = Command::new(node);
+            command.arg(script);
+            return Ok((command, "dev-node".into()));
+        }
+    }
+
+    Err(
+        "找不到 Pattern 运行时。请重新安装完整安装包（需包含 resources/pattern-runtime），或设置 PATTERN_SIDECAR_PATH。"
+            .into(),
+    )
+}
+
+fn which_node() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PATTERN_NODE_PATH").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    // Last-resort for developers only (never create a console window on Windows).
+    let mut command = Command::new(if cfg!(windows) { "where" } else { "which" });
+    command.arg("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .output()
+        .ok()
+        .and_then(|out| {
+            if !out.status.success() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().next().map(|line| PathBuf::from(line.trim()))
+        })
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "系统未安装 Node，且安装包未附带 pattern-runtime".to_string())
+}
+
 fn start_runtime(state: &RuntimeState) -> Result<(), String> {
     if let Ok(mut guard) = state.child.lock() {
         if let Some(mut child) = guard.take() {
@@ -632,31 +754,15 @@ fn start_runtime(state: &RuntimeState) -> Result<(), String> {
     if let Ok(mut guard) = state.connection.lock() {
         *guard = None;
     }
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../sidecar/dist/index.cjs");
-    let binary_name = if cfg!(windows) { "pattern-sidecar.exe" } else { "pattern-sidecar" };
-    let dev_binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../sidecar/dist").join(binary_name);
-    let bundled_binary = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("resources").join(binary_name)));
-    let configured_binary = std::env::var_os("PATTERN_SIDECAR_PATH").map(PathBuf::from);
-    let binary = configured_binary
-        .filter(|path| path.exists())
-        .or_else(|| dev_binary.exists().then_some(dev_binary))
-        .or_else(|| bundled_binary.filter(|path| path.exists()));
-    let mut command = if let Some(binary) = binary {
-        Command::new(binary)
-    } else {
-        if !script.exists() {
-            return Err(format!("找不到 sidecar 构建产物：{}", script.display()));
-        }
-        let mut command = Command::new("node");
-        command.arg(script);
-        command
-    };
-    // GUI apps on Windows often inherit a broken/closed console pipe. Inherit stderr
-    // then surfaces ERROR_NO_DATA (0x800700e8) when the child writes. Pipe all stdio
-    // and hide the console window so node/sidecar can start cleanly.
+
+    let (mut command, source) = resolve_sidecar_command()?;
+    eprintln!("[pattern] starting sidecar via {source}");
+
+    // GUI apps on Windows must not inherit a broken console. Pipe all stdio and never create a window.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW — no black cmd flash for node/sidecar
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
@@ -665,7 +771,7 @@ fn start_runtime(state: &RuntimeState) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("无法启动 sidecar：{error}"))?;
+        .map_err(|error| format!("无法启动 sidecar（{source}）：{error}"))?;
     if let Some(stderr) = child.stderr.take() {
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
@@ -676,12 +782,25 @@ fn start_runtime(state: &RuntimeState) -> Result<(), String> {
     }
     let stdout = child.stdout.take().ok_or("无法读取 sidecar stdout")?;
     let mut line = String::new();
-    BufReader::new(stdout)
-        .read_line(&mut line)
-        .map_err(|error| format!("读取 sidecar 握手失败：{error}"))?;
+    // Fresh machines may take a moment to load native modules (better-sqlite3).
+    let mut reader = BufReader::new(stdout);
+    for _ in 0..50 {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) if !line.trim().is_empty() => break,
+            Ok(_) => continue,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("读取 sidecar 握手失败：{error}"));
+            }
+        }
+    }
     if line.trim().is_empty() {
         let _ = child.kill();
-        return Err("sidecar 未输出握手信息（可能启动失败）".into());
+        return Err(format!(
+            "sidecar 未输出握手信息（启动源：{source}）。全新环境请确认安装包含 resources/pattern-runtime。"
+        ));
     }
     let connection: RuntimeConnection =
         serde_json::from_str(line.trim()).map_err(|error| format!("sidecar 握手失败：{error}"))?;
@@ -703,6 +822,33 @@ fn write_stdin(state: &RuntimeState, message: serde_json::Value) -> Result<(), S
         stdin.flush().map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+/// A saved handshake is not proof that the sidecar is still alive.  The
+/// frontend asks `runtime_connection` while reconnecting, so discard a stale
+/// child here and let that command start a fresh runtime instead of returning
+/// an unusable port/token forever.
+fn runtime_child_is_running(state: &RuntimeState) -> bool {
+    let mut guard = match state.child.lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    let Some(child) = guard.as_mut() else {
+        return false;
+    };
+    match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(status)) => {
+            eprintln!("[pattern] sidecar exited: {status}");
+            *guard = None;
+            false
+        }
+        Err(error) => {
+            eprintln!("[pattern] failed to inspect sidecar: {error}");
+            *guard = None;
+            false
+        }
+    }
 }
 
 
@@ -758,8 +904,11 @@ fn runtime_connection(state: State<'_, RuntimeState>) -> Option<RuntimeConnectio
         .lock()
         .ok()
         .and_then(|value| value.clone());
-    if existing.is_some() {
+    if existing.is_some() && runtime_child_is_running(&state) {
         return existing;
+    }
+    if let Ok(mut connection) = state.connection.lock() {
+        *connection = None;
     }
     // Attempt a one-shot restart so the frontend can recover after sidecar death.
     if let Err(error) = start_runtime(&state) {
@@ -1276,8 +1425,17 @@ fn open_permission_settings(kind: String) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let page = if kind == "notifications" { "ms-settings:notifications" } else if kind == "screen" { "ms-settings:privacy-screenrecording" } else { "ms-settings:privacy" };
-        std::process::Command::new("explorer.exe").arg(page).spawn().map_err(|error| error.to_string())?;
+        // CREATE_NO_WINDOW so no console host flashes when opening Settings
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", page])
+            .creation_flags(0x0800_0000)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
