@@ -773,8 +773,12 @@ public partial class MainPage : ContentPage
         exportBackup.Clicked += async (_, _) => await ExportBackupAsync(output);
         var importBackup = new Button { Text = "导入客户端备份" };
         importBackup.Clicked += async (_, _) => await ImportBackupAsync(output);
+        var exportData = new Button { Text = "导出 Agent 数据" };
+        exportData.Clicked += async (_, _) => await ExportDataSnapshotAsync(output);
+        var importData = new Button { Text = "导入 Agent 数据" };
+        importData.Clicked += async (_, _) => await ImportDataSnapshotAsync(output);
         var backupHint = new Label { Text = "备份包含配置与会话，不包含 API Key/Relay 密钥", FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center };
-        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, backupHint } } }, output);
+        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, exportData, importData, backupHint } } }, output);
     }
 
     private async Task ExportBackupAsync(Editor output)
@@ -829,6 +833,58 @@ public partial class MainPage : ContentPage
         {
             output.Text = $"导入失败：{error.Message}";
             StatusLabel.Text = "客户端备份导入失败";
+        }
+    }
+
+    private async Task ExportDataSnapshotAsync(Editor output)
+    {
+        try
+        {
+            if (OperatingSystem.IsAndroid()) throw new InvalidOperationException("Android 是 relay-only 客户端，Agent 数据由配对的桌面 sidecar 管理。");
+            var response = await _runtime.RequestAsync(new { type = "data.export" }, TimeSpan.FromSeconds(30));
+            var snapshot = response.TryGetProperty("snapshot", out var value) ? value : response;
+            var path = System.IO.Path.Combine(FileSystem.CacheDirectory, $"pattern-agent-data-{DateTime.UtcNow:yyyyMMdd-HHmmss}.json");
+            await File.WriteAllTextAsync(path, snapshot.GetRawText());
+            try
+            {
+                await Share.Default.RequestAsync(new ShareFileRequest { Title = "Pattern Agent 数据快照", File = new ShareFile(path) });
+                output.Text = $"Agent 数据快照已导出并打开系统分享：\n{path}\n\n设备密钥、relay outbox、模型缓存和插件目录已排除。";
+            }
+            catch (Exception shareError) { output.Text = $"快照已生成（系统分享不可用）：\n{path}\n{shareError.Message}"; }
+            StatusLabel.Text = "Agent 数据快照已导出";
+        }
+        catch (Exception error)
+        {
+            output.Text = $"导出 Agent 数据失败：{error.Message}";
+            StatusLabel.Text = "Agent 数据导出失败";
+        }
+    }
+
+    private async Task ImportDataSnapshotAsync(Editor output)
+    {
+        try
+        {
+            if (OperatingSystem.IsAndroid()) throw new InvalidOperationException("Android 是 relay-only 客户端，请在桌面 sidecar 所在设备导入 Agent 数据。");
+            var file = await FilePicker.Default.PickAsync(new PickOptions { PickerTitle = "选择 Pattern Agent 数据快照" });
+            if (file is null) return;
+            await using var stream = await file.OpenReadAsync();
+            if (stream.Length > 8 * 1024 * 1024) throw new InvalidOperationException("Agent 数据快照超过 8 MB 限制。");
+            using var reader = new StreamReader(stream);
+            var json = await reader.ReadToEndAsync();
+            using var document = JsonDocument.Parse(json);
+            var response = await _runtime.RequestAsync(new Dictionary<string, object?>
+            {
+                ["type"] = "data.import",
+                ["snapshot"] = document.RootElement.Clone(),
+            }, TimeSpan.FromSeconds(30));
+            output.Text = Format(response) + "\n\n导入后建议重启 Pattern，使主动能力引擎重新载入快照文件。";
+            StatusLabel.Text = "Agent 数据快照已导入";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            output.Text = $"导入 Agent 数据失败：{error.Message}";
+            StatusLabel.Text = "Agent 数据导入失败";
         }
     }
 

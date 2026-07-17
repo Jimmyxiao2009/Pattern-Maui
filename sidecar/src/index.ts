@@ -4,7 +4,7 @@ import {createInterface} from 'node:readline';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {homedir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, writeFileSync, watch, statSync, readdirSync, unlinkSync, type FSWatcher} from 'node:fs';
 import {WebSocketServer, WebSocket} from 'ws';
 import {MemoryEngine, categoryLabel, ensureDataDir, localEmbed, type MemoryRecord} from '@pattern/memory';
@@ -35,6 +35,7 @@ import type {
   SessionPlan,
   SessionPlanItem,
   AuditEntry,
+  DataSnapshot,
 } from '@pattern/protocol';
 import {
   clearSessionPlan,
@@ -82,6 +83,67 @@ let computerUseQueue: Promise<void> = Promise.resolve();
 let recoveryReconciled = false;
 let recoveryReconciliationInFlight: Promise<void> | null = null;
 let modelMetrics = loadModelMetrics();
+
+const SNAPSHOT_FILES = [
+  'goals.json', 'session-plans.json', 'workflows.json', 'skills.json', 'tasks.json',
+  'model-metrics.json', 'mcp-servers.json', 'security-policy.json', 'projects.json',
+  'file-watch.json', 'health-checks.json', 'cron-triggers.json', 'proactive.json',
+  'proactive-chains.json', 'last-dream-day.txt', 'telegram-offset.txt',
+  'journal/actions.jsonl', 'logs/proactive.jsonl',
+] as const;
+const SNAPSHOT_EXCLUDED = ['device.json', 'relay-outbox.json', 'relay-cursor.json', 'models/', 'plugins/'];
+const SNAPSHOT_FILE_LIMIT = 2 * 1024 * 1024;
+const SNAPSHOT_TOTAL_LIMIT = 8 * 1024 * 1024;
+
+function exportDataSnapshot(): DataSnapshot {
+  const files: Record<string, string> = {};
+  let total = 0;
+  for (const relative of SNAPSHOT_FILES) {
+    const file = join(dataDir, relative);
+    if (!existsSync(file) || !statSync(file).isFile()) continue;
+    const size = statSync(file).size;
+    if (size > SNAPSHOT_FILE_LIMIT || total + size > SNAPSHOT_TOTAL_LIMIT) continue;
+    const content = readFileSync(file, 'utf8');
+    files[relative] = content;
+    total += Buffer.byteLength(content, 'utf8');
+  }
+  return {version: 1, exportedAt: Date.now(), files, memories: memory.exportAll(), excluded: SNAPSHOT_EXCLUDED};
+}
+
+function importDataSnapshot(snapshot: DataSnapshot) {
+  if (!snapshot || snapshot.version !== 1) throw new Error('不支持的数据快照版本');
+  const allowed = new Set<string>(SNAPSHOT_FILES);
+  let total = 0;
+  const files = Object.entries(snapshot.files || {});
+  for (const [relative, content] of files) {
+    if (!allowed.has(relative) || typeof content !== 'string') throw new Error(`快照包含不允许的文件：${relative}`);
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > SNAPSHOT_FILE_LIMIT || total + bytes > SNAPSHOT_TOTAL_LIMIT) throw new Error('数据快照超过大小限制');
+    if (relative.endsWith('.json')) {
+      try { JSON.parse(content); } catch { throw new Error(`快照文件不是有效 JSON：${relative}`); }
+    }
+    total += bytes;
+  }
+  if (!Array.isArray(snapshot.memories) || snapshot.memories.length > 10000) throw new Error('快照记忆数量无效');
+  // Validate the complete payload before mutating the live data directory.
+  for (const [relative, content] of files) {
+    const file = join(dataDir, relative);
+    mkdirSync(dirname(file), {recursive: true});
+    writeFileSync(file, content);
+  }
+  memory.importAll(snapshot.memories);
+  // Refresh in-memory configuration used by subsequent requests. The proactive
+  // engine itself is intentionally left running; a restart picks up its files.
+  tasks = loadTasks();
+  customSkills = loadCustomSkills();
+  customWorkflows = loadCustomWorkflows(dataDir);
+  mcpServers = loadMcpServers();
+  fileWatchConfig = loadFileWatchConfig();
+  healthChecks = loadHealthChecks();
+  cronTriggers = loadCronTriggers();
+  securityPolicy = loadSecurityPolicy();
+  return {files: files.length, memories: snapshot.memories.length, restartRequired: true};
+}
 function skillsFile() {
   return join(dataDir, 'skills.json');
 }
@@ -3900,6 +3962,20 @@ async function handleClient(socket: TransportSocket, message: ClientMessage) {
           send(socket, {type: 'runtime.foreground.result', id: message.id, title, busyHint});
         } catch {
           send(socket, {type: 'runtime.foreground.result', id: message.id, title: '', busyHint: false});
+        }
+        break;
+      }
+      case 'data.export': {
+        send(socket, {type: 'data.export.result', id: message.id, snapshot: exportDataSnapshot()});
+        break;
+      }
+      case 'data.import': {
+        try {
+          const result = importDataSnapshot(message.snapshot);
+          send(socket, {type: 'data.import.result', id: message.id, ok: true, ...result});
+          broadcast({type: 'data.changed'});
+        } catch (error) {
+          send(socket, {type: 'error', id: message.id, message: error instanceof Error ? error.message : String(error)});
         }
         break;
       }

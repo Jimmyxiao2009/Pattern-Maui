@@ -459,6 +459,53 @@ export class MemoryEngine {
     return rows.map((r) => this.mapRow(r));
   }
 
+  /** Export all records for a user-controlled, versioned data snapshot. */
+  exportAll(limit = 10000): MemoryRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id,text,category,importance,created_at,updated_at,access_count,source_conv,expired,replaces_id
+         FROM memory ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(10000, limit))) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapRow(row));
+  }
+
+  /** Restore records without importing the SQLite file itself. */
+  importAll(items: MemoryRecord[]) {
+    const insert = this.db.prepare(
+      `INSERT INTO memory(id,text,category,importance,created_at,updated_at,access_count,source_conv,expired,replaces_id,embedding)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(id) DO UPDATE SET text=excluded.text, category=excluded.category,
+         importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
+         access_count=excluded.access_count, source_conv=excluded.source_conv, expired=excluded.expired,
+         replaces_id=excluded.replaces_id, embedding=excluded.embedding`,
+    );
+    const apply = this.db.transaction((records: MemoryRecord[]) => {
+      for (const item of records.slice(0, 10000)) {
+        const text = String(item.text || '').trim().slice(0, 12000);
+        if (!text) continue;
+        const id = String(item.id || randomUUID()).slice(0, 120);
+        insert.run(
+          id,
+          text,
+          normalizeCategory(String(item.category || 'fact')),
+          clampImportance(Number(item.importance)),
+          Math.max(0, Number(item.createdAt) || now()),
+          Math.max(0, Number(item.updatedAt) || now()),
+          Math.max(0, Number(item.accessCount) || 0),
+          item.sourceConv == null ? null : String(item.sourceConv).slice(0, 240),
+          item.expired ? 1 : 0,
+          item.replacesId == null ? null : String(item.replacesId).slice(0, 120),
+          null,
+        );
+      }
+    });
+    apply(items);
+    this.rebuildFts();
+    this.setMeta('fts_version', '2');
+    this.refreshIndex();
+  }
+
   async search(query: string, k = 5): Promise<SearchHit[]> {
     const q = query.trim();
     if (!q) return [];

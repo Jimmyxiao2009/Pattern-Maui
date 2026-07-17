@@ -58,6 +58,7 @@
 ### Phase 5 — 迁移收口
 
 - 将旧 Svelte 页面逐项对照验收并删除 MAUI 占位页；补齐深链接、客户端配置/会话导入导出、备份恢复和数据 schema migration。
+- 提供 sidecar Agent 数据快照导入/导出：版本化 JSON、大小与文件 allowlist 校验，导入后刷新运行时配置；设备密钥、relay 游标/outbox、模型缓存和插件目录永不导出。
 - TypeScript strict typecheck、C# analyzers、端到端测试和崩溃日志脱敏。
 - 归档 Tauri/Rust 源码只读保存，工作区只保留纯源码和文档，不提交 `bin/obj/dist/node_modules`。
 
@@ -70,6 +71,7 @@
 5. Android 不能直接运行 Node sidecar；明确 relay-only 状态和配对错误，避免假装本地 Agent 已启动。
 6. 当前 `dotnet run` 在无桌面会话的构建环境出现 Windows App SDK `0xC000027B`，不等同于 sidecar 连接失败；CI 以 build + stdio 集成为准，真实桌面机执行 GUI smoke test。
 7. 客户端设置页提供版本化 JSON 备份导入/导出，并迁移旧的无版本备份格式；API Key、WebDAV 密码和频道密钥永不进入备份。
+8. Agent 数据快照由 sidecar 统一生成和导入，MAUI 只负责文件选择与系统分享；快照写入前完成完整校验，避免部分导入。
 
 ## 当前可运行验收（2026-07-18）
 

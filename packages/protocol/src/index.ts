@@ -379,6 +379,15 @@ export interface AuditEntry {
   decision?: 'allowed' | 'approved' | 'denied' | 'info';
 }
 
+/** Versioned non-secret sidecar snapshot exchanged by MAUI backup actions. */
+export interface DataSnapshot {
+  version: 1;
+  exportedAt: number;
+  files: Record<string, string>;
+  memories: MemoryRecord[];
+  excluded: string[];
+}
+
 export type ClientMessage =
   | {
       type: 'chat.send';
@@ -458,7 +467,9 @@ export type ClientMessage =
   | { type: 'security.policy.set'; id: string; policy: Partial<SecurityPolicy> }
   | { type: 'recovery.status'; id: string }
   | { type: 'runtime.ping'; id: string }
-  | { type: 'runtime.foreground'; id: string };
+  | { type: 'runtime.foreground'; id: string }
+  | { type: 'data.export'; id: string }
+  | { type: 'data.import'; id: string; snapshot: DataSnapshot };
 
 export type ServerMessage =
   | { type: 'runtime.ready'; transport?: 'websocket' | 'stdio' }
@@ -517,4 +528,7 @@ export type ServerMessage =
   | { type: 'security.policy'; id: string; policy: SecurityPolicy }
   | { type: 'recovery.status.result'; id: string; available: boolean; store?: string; transactionCount: number; openCount: number; error?: string }
   | { type: 'runtime.foreground.result'; id: string; title: string; busyHint?: boolean }
+  | { type: 'data.export.result'; id: string; snapshot: DataSnapshot }
+  | { type: 'data.import.result'; id: string; ok: boolean; files: number; memories: number; restartRequired: boolean }
+  | { type: 'data.changed' }
   | { type: 'error'; id: string; message: string };
