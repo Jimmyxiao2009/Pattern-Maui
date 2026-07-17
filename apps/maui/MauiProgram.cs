@@ -16,6 +16,12 @@ public static class MauiProgram
             return bridge;
         });
         builder.Services.AddSingleton<SidecarRuntime>();
+        builder.Services.AddSingleton<SingleInstanceService>(_ =>
+        {
+            var instance = new SingleInstanceService();
+            instance.Acquire();
+            return instance;
+        });
         builder.Services.AddSingleton<AppSettingsStore>();
         builder.Services.AddSingleton<RelayService>();
         builder.Services.AddSingleton<MainPage>();

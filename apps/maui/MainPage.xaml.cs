@@ -19,6 +19,7 @@ public partial class MainPage : ContentPage
     private readonly AppSettingsStore _settings;
     private readonly RelayService _relay;
     private readonly NativeBridgeService _bridge;
+    private readonly SingleInstanceService _instance;
     private readonly List<ChatTurn> _history = [];
     private readonly Dictionary<string, View> _views = [];
     private Label? _conversationLabel;
@@ -29,13 +30,14 @@ public partial class MainPage : ContentPage
     private string _activeAssistantText = string.Empty;
     private bool _loaded;
 
-    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge)
+    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance)
     {
         InitializeComponent();
         _runtime = runtime;
         _settings = settings;
         _relay = relay;
         _bridge = bridge;
+        _instance = instance;
         LoadHistory();
 
         foreach (var (id, label) in NavigationItems)
@@ -85,6 +87,11 @@ public partial class MainPage : ContentPage
             if (_loaded) return;
             _loaded = true;
             ShowView("chat");
+            if (!_instance.IsPrimary)
+            {
+                StatusLabel.Text = "Pattern 已在运行；为避免两个 sidecar 同时写入数据，本窗口不会启动第二个运行时。";
+                return;
+            }
             await ConnectAsync();
         };
     }

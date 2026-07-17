@@ -13,7 +13,7 @@
 | UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 原生导航壳、OOBE、聊天、项目/会话/记忆/目标/任务/主动/技能/工作流/MCP/通道/模型/监控/审计/设置页已接入；复杂原生窗口仍按平台补齐 |
 | Client services | `SidecarRuntime`、relay、会话/项目缓存、平台适配器 | stdio 生命周期和重连已完成 |
 | Agent runtime | 模型循环、记忆、主动任务、技能、MCP、渠道、审计 | 继续复用并修复 TypeScript sidecar |
-| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power 和明确能力回退；Android 前台 relay 同步与通知权限已接入；tray/hotkey/真实输入截图/macOS 菜单栏需真机阶段 |
+| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power、Win32 输入、截图、窗口控件树/动作、冻结和提示；单实例保护已接入；tray/hotkey 外壳与 macOS 菜单栏仍需对应平台真机阶段 |
 | Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor 已接入，sidecar 策略/审计/恢复能力已统一 |
 
 ## 分阶段交付
