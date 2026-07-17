@@ -35,4 +35,9 @@ test('native stdio transport starts, handshakes, and answers a ping', async (t) 
   while (messages.length === 0 || messages.at(-1)?.type !== 'runtime.status') messages.push(await nextMessage());
   assert.equal(messages.at(-1).id, 'stdio-test');
   assert.equal(messages.at(-1).sidecar, 'connected');
+
+  child.stdin.write(`${JSON.stringify({type: 'memory.list', id: 'memory-test', limit: 5})}\n`);
+  while (messages.length === 0 || messages.at(-1)?.id !== 'memory-test') messages.push(await nextMessage());
+  assert.equal(messages.at(-1).type, 'memory.list.result');
+  assert.ok(Array.isArray(messages.at(-1).items));
 });

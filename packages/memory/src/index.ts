@@ -452,8 +452,8 @@ export class MemoryEngine {
     const rows = this.db
       .prepare(
         `SELECT id,text,category,importance,created_at,updated_at,access_count,source_conv,expired,replaces_id
-         FROM memory WHERE expired = 0 AND (?1 IS NULL OR category = ?1)
-         ORDER BY importance DESC, updated_at DESC LIMIT ?2`,
+         FROM memory WHERE expired = 0 AND category = COALESCE(?, category)
+         ORDER BY importance DESC, updated_at DESC LIMIT ?`,
       )
       .all(cat, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => this.mapRow(r));

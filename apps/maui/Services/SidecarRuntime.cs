@@ -24,6 +24,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
     private Task? _receiveTask;
     private bool _intentionalStop;
     private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _pending = [];
+    private readonly Queue<string> _stderrTail = new();
 
     public event Action<string>? StatusChanged;
     public event Action<string>? ChatDelta;
@@ -49,21 +50,24 @@ public sealed class SidecarRuntime : IAsyncDisposable
             if (IsConnected) return;
             await StopCoreAsync();
             _intentionalStop = false;
+            lock (_stderrTail) _stderrTail.Clear();
             StatusChanged?.Invoke("正在启动本地运行时…");
 
             var sidecar = FindSidecar();
             var node = FindNode(sidecar);
-            var process = Process.Start(new ProcessStartInfo
+            var processStart = new ProcessStartInfo
             {
                 FileName = node,
-                Arguments = $"\"{sidecar}\" --stdio",
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
                 WorkingDirectory = Path.GetDirectoryName(sidecar)!,
-            }) ?? throw new InvalidOperationException("无法启动 Node sidecar。");
+            };
+            processStart.ArgumentList.Add(sidecar);
+            processStart.ArgumentList.Add("--stdio");
+            var process = Process.Start(processStart) ?? throw new InvalidOperationException("无法启动 Node sidecar。");
 
             _process = process;
             _runtimeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -93,9 +97,13 @@ public sealed class SidecarRuntime : IAsyncDisposable
             await ConfigureFromEnvironmentAsync(cancellationToken);
             StatusChanged?.Invoke("运行时已连接");
         }
-        catch
+        catch (Exception error)
         {
             await StopCoreAsync();
+            string diagnostics;
+            lock (_stderrTail) diagnostics = string.Join(" | ", _stderrTail);
+            if (!string.IsNullOrWhiteSpace(diagnostics))
+                throw new InvalidOperationException($"sidecar 启动失败：{error.Message}（stderr: {diagnostics}）", error);
             throw;
         }
         finally { _lifecycle.Release(); }
@@ -161,7 +169,9 @@ public sealed class SidecarRuntime : IAsyncDisposable
 
     public async Task ConfigureAsync(object configuration, CancellationToken cancellationToken = default)
     {
-        var process = _process ?? throw new InvalidOperationException("sidecar 未启动。");
+        var process = _process is { HasExited: false } running
+            ? running
+            : throw new InvalidOperationException("sidecar 未启动或已退出。");
         await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { method = "runtime.configure", @params = configuration }));
         await process.StandardInput.FlushAsync(cancellationToken);
     }
@@ -313,7 +323,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
             }
             catch (JsonException) { /* tolerate diagnostic lines before the startup record */ }
         }
-        throw new TimeoutException("等待 sidecar 端口令牌超时。");
+        throw new TimeoutException("等待 sidecar 启动握手超时。");
     }
 
     private async Task DrainStderrAsync(Process process, CancellationToken cancellationToken)
@@ -324,6 +334,11 @@ public sealed class SidecarRuntime : IAsyncDisposable
             {
                 var line = await process.StandardError.ReadLineAsync(cancellationToken);
                 if (line is null) break;
+                lock (_stderrTail)
+                {
+                    _stderrTail.Enqueue(line);
+                    while (_stderrTail.Count > 40) _stderrTail.Dequeue();
+                }
                 Debug.WriteLine($"[pattern-sidecar] {line}");
             }
         }
@@ -343,7 +358,8 @@ public sealed class SidecarRuntime : IAsyncDisposable
     private static string FindNode(string sidecar)
     {
         var configured = Environment.GetEnvironmentVariable("PATTERN_NODE_PATH");
-        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)) return Path.GetFullPath(configured);
+        if (!string.IsNullOrWhiteSpace(configured))
+            return Path.IsPathRooted(configured) ? Path.GetFullPath(configured) : configured;
         var root = new DirectoryInfo(Path.GetDirectoryName(sidecar)!);
         while (root is not null)
         {

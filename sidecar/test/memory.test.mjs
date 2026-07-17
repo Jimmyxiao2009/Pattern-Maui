@@ -31,6 +31,7 @@ test('memory engine add/search/expire via better-sqlite3', async () => {
   try {
     const {MemoryEngine} = loadMemory();
     const engine = new MemoryEngine(dir);
+    assert.deepEqual(engine.list(), [], 'an empty memory store should be listable');
     const item = await engine.add({text: '用户养了一只黄眼睛的黑猫', category: 'fact', importance: 0.8});
     assert.equal(item.expired, false);
     const hits = await engine.search('黑猫', 3);
