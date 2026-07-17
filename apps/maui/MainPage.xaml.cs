@@ -70,10 +70,19 @@ public partial class MainPage : ContentPage
         }
 
         _runtime.StatusChanged += status => MainThread.BeginInvokeOnMainThread(() => StatusLabel.Text = status);
-        _runtime.RuntimeEvent += message => MainThread.BeginInvokeOnMainThread(() =>
+        _runtime.RuntimeEvent += message => MainThread.BeginInvokeOnMainThread(async () =>
         {
             if (message.TryGetProperty("state", out var state)) StatusLabel.Text = $"运行时：{state.GetString()}";
             if (message.TryGetProperty("item", out _)) StatusLabel.Text = "收到新的主动消息";
+            if (message.TryGetProperty("type", out var type))
+            {
+                switch (type.GetString())
+                {
+                    case "task.updated": StatusLabel.Text = "任务状态已更新"; break;
+                    case "task.screenshot": StatusLabel.Text = "任务收到新的桌面回执"; break;
+                    case "task.approval_required": await ShowApprovalReviewAsync(message); break;
+                }
+            }
         });
         _runtime.ChatDelta += delta => MainThread.BeginInvokeOnMainThread(() =>
         {
@@ -777,6 +786,27 @@ public partial class MainPage : ContentPage
             deviceId = relay.DeviceId,
             channelKey = relay.ChannelKey,
         });
+    }
+
+    private async Task ShowApprovalReviewAsync(JsonElement message)
+    {
+        var taskId = message.TryGetProperty("taskId", out var id) ? id.GetString() : null;
+        if (string.IsNullOrWhiteSpace(taskId)) return;
+        var detail = "Pattern 请求执行一项需要确认的桌面操作。";
+        if (message.TryGetProperty("step", out var step) && step.ValueKind == JsonValueKind.Object)
+        {
+            var action = step.TryGetProperty("action", out var actionValue) ? actionValue.GetString() : "操作";
+            var reason = step.TryGetProperty("detail", out var reasonValue) ? reasonValue.GetString() : "";
+            detail = $"动作：{action}\n原因：{reason}";
+        }
+        var choice = await DisplayActionSheetAsync($"需要人工审批\n{detail}", "拒绝", null, "批准");
+        var actionName = choice == "批准" ? "approve" : "reject";
+        try
+        {
+            await _runtime.RequestAsync(new { type = "task.control", taskId, action = actionName });
+            StatusLabel.Text = actionName == "approve" ? "已批准任务操作" : "已拒绝任务操作";
+        }
+        catch (Exception error) { StatusLabel.Text = $"审批回传失败：{error.Message}"; }
     }
 
     private async Task SendAsync()

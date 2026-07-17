@@ -291,7 +291,10 @@ public sealed class SidecarRuntime : IAsyncDisposable
             case "chat.event":
             case "runtime.agent_state":
             case "proactive.impulse":
-            case "proactive.inbox.updated": RuntimeEvent?.Invoke(message.Clone()); break;
+            case "proactive.inbox.updated":
+            case "task.updated":
+            case "task.approval_required":
+            case "task.screenshot": RuntimeEvent?.Invoke(message.Clone()); break;
         }
     }
 
