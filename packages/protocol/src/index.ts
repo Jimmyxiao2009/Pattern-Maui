@@ -191,6 +191,9 @@ export interface TaskRecord {
     transactionId?: string;
     state: 'unavailable' | 'active' | 'prepared' | 'committed' | 'rolled_back' | 'conflicted' | 'recovery_required';
     fileScopes: string[];
+    registryScopes?: string[];
+    serviceScopes?: string[];
+    scheduledTaskScopes?: string[];
     error?: string;
   };
 }
@@ -399,6 +402,7 @@ export type ClientMessage =
   | { type: 'memory.update'; id: string; memoryId: string; item: Partial<MemoryRecord> & { text?: string; category?: MemoryCategory | string; importance?: number } }
   | { type: 'memory.expire'; id: string; memoryId: string }
   | { type: 'memory.stats'; id: string }
+  | { type: 'memory.dream'; id: string }
   | { type: 'proactive.list'; id: string; limit?: number }
   | { type: 'proactive.chain.list'; id: string; limit?: number }
   | { type: 'proactive.chain.cancel'; id: string; chainId: string }

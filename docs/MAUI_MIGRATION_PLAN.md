@@ -73,6 +73,7 @@
 ## 当前可运行验收（2026-07-18）
 
 - `pnpm sidecar:test`：stdio、memory、relay、channels、computer-use、e2e、路由测试通过；Windows relay 测试结束时的 `UV_HANDLE_CLOSING` 是 Node teardown 已知噪声，测试 runner 已按 4 个断言通过处理。
+- `pnpm sidecar:typecheck`：sidecar 与 workspace packages 的 TypeScript strict 检查通过；workspace alias、MCP、recovery、proactive 和 channel 类型已对齐。
 - `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
 - `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
 - Windows/macOS 运行时均使用 sidecar stdio；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，不要求用户访问 `127.0.0.1`。

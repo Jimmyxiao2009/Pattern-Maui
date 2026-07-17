@@ -123,7 +123,7 @@ export class ProactiveEngine {
       const normalized = value.filter((item): item is ProactiveChain => !!item && typeof item.id === 'string' && typeof item.purpose === 'string')
         .map((item) => ({
           ...item,
-          kind: item.kind === 'required_reminder' ? 'required_reminder' : 'autonomous',
+          kind: (item.kind === 'required_reminder' ? 'required_reminder' : 'autonomous') as ProactiveChain['kind'],
           status: ['active', 'running', 'completed', 'cancelled', 'failed'].includes(item.status) ? item.status : 'active',
           nextRunAt: typeof item.nextRunAt === 'number' ? item.nextRunAt : null,
           timezone: item.timezone || 'UTC',

@@ -34,6 +34,7 @@ import type {
   GoalState,
   SessionPlan,
   SessionPlanItem,
+  AuditEntry,
 } from '@pattern/protocol';
 import {
   clearSessionPlan,
@@ -48,7 +49,7 @@ import {
   saveGoals,
   setSessionPlan,
   type SlashDeps,
-} from './slash-handlers';
+} from './slash-handlers.js';
 interface ChatRequest {
   type: 'chat.send';
   id: string;
@@ -166,10 +167,12 @@ function makeSlashDeps(ctx?: {conversationId?: string; workspace?: string; proje
         const item = {
           id: randomUUID(),
           type: 'manual',
+          topicKey: `manual:${Date.now()}`,
           body: reason,
           reason,
+          channel: 'inbox',
           origin: 'system' as const,
-          state: 'unread',
+          state: 'unread' as const,
           ts: Math.floor(Date.now() / 1000),
           delivered: true,
         };
@@ -376,7 +379,7 @@ function listMcpCompanionTools(): CompanionTool[] {
           serverName: server.name,
           name: tool.name,
           description: tool.description || `${server.name}/${tool.name}`,
-          inputSchema: tool.inputSchema || {type: 'object', properties: {}},
+          inputSchema: (tool.inputSchema || {type: 'object', properties: {}}) as Record<string, unknown>,
           kind: 'mcp' as const,
         }));
       }
@@ -1751,7 +1754,9 @@ async function planWorkflowAgents(task: TaskRecord, workflow: WorkflowDefinition
   }
 }
 async function runWorkflowAgents(task: TaskRecord) {
-  const workflow = codingWorkflows.find((item) => item.id === task.workflow?.id);
+  const taskWorkflow = task.workflow;
+  if (!taskWorkflow) return;
+  const workflow = codingWorkflows.find((item) => item.id === taskWorkflow.id);
   if (!workflow) return;
   const planned = await planWorkflowAgents(task, workflow);
   const maxAgents = Math.max(1, Math.min(MAX_AGENT_COUNT, task.workflow?.agents || workflow.maxAgents));
@@ -1795,7 +1800,7 @@ async function runWorkflowAgents(task: TaskRecord) {
       results.push({skillId:'moderator', output:synthesis, status:'done', ts:Date.now()});
     } catch (error) { results.push({skillId:'moderator', output:`主持汇总失败：${error}`, status:'failed', ts:Date.now()}); }
   }
-  task.agentResults = results; task.workflow.currentStep = results.length; saveTasks(); announceTask(task);
+  task.agentResults = results; taskWorkflow.currentStep = results.length; saveTasks(); announceTask(task);
 }
 const approvalWaiters = new Map<string, {resolve: (ok: boolean) => void}>();
 const defaultFileWatchConfig: FileWatchConfig = {enabled: false, paths: [], extensions: ['.md', '.txt', '.json', '.ts', '.js', '.svelte', '.rs', '.py'], maxBytes: 65536};
@@ -1833,7 +1838,7 @@ interface TransportSocket {
 
 /** A single-owner JSONL transport used by native MAUI clients. */
 class StdioSocket implements TransportSocket {
-  readyState = WebSocket.OPEN;
+  readyState: number = WebSocket.OPEN;
   send(value: string) {
     if (this.readyState !== WebSocket.OPEN) return;
     process.stdout.write(`${value}\n`);
@@ -1881,7 +1886,7 @@ async function discoverMcpTools(server: McpServerConfig): Promise<Array<{name:st
   const request = (id:number, method:string, params:unknown) => JSON.stringify({jsonrpc:'2.0', id, method, params}) + '\n';
   child.stdin?.write(request(1, 'initialize', {protocolVersion:'2024-11-05', capabilities:{}, clientInfo:{name:'pattern',version:'0.3.0'}}));
   child.stdin?.write(request(2, 'tools/list', {}));
-  return await new Promise<string[]>((resolve, reject) => {
+  return await new Promise<Array<{name:string;description?:string;inputSchema?:unknown}>>((resolve, reject) => {
     let buffer = ''; const timer = setTimeout(() => { child.kill(); reject(new Error('MCP discovery timeout')); }, 8000);
     child.stdout?.on('data', (chunk:Buffer) => {
       buffer += chunk.toString();
@@ -2137,7 +2142,7 @@ async function beginTaskRecovery(task: TaskRecord): Promise<string | undefined> 
     && !!fileScope;
   const capabilities = await bridgeCall('/recovery/capabilities', undefined, true);
   if (!capabilities?.available || fileScopes.length === 0) {
-    task.recovery = {
+    const recovery = task.recovery = {
       state: 'unavailable',
       fileScopes: declaredScopes.fileScopes,
       registryScopes: declaredScopes.registryScopes,
@@ -2145,10 +2150,10 @@ async function beginTaskRecovery(task: TaskRecord): Promise<string | undefined> 
       scheduledTaskScopes: declaredScopes.scheduledTaskScopes,
       error: !capabilities?.available ? 'AgentOS recovery runtime is unavailable' : 'No existing workspace scope was declared',
     };
-    appendJournal({line: `${task.id} RECOVERY_UNAVAILABLE ${task.recovery.error}`, tier: 1, kind: 'recovery', taskId: task.id, decision: 'info'});
+    appendJournal({line: `${task.id} RECOVERY_UNAVAILABLE ${recovery.error}`, tier: 1, kind: 'recovery', taskId: task.id, decision: 'info'});
     saveTasks(); announceTask(task);
     if (recoveryRequired) {
-      throw new Error(`工作区写入已阻止：${task.recovery.error}`);
+      throw new Error(`工作区写入已阻止：${recovery.error}`);
     }
     return undefined;
   }
@@ -2168,33 +2173,34 @@ async function finalizeTaskRecovery(
   outcome: 'commit' | 'rollback',
   options: {assumeExclusive?: boolean} = {},
 ): Promise<void> {
-  const transactionId = task.recovery?.transactionId;
-  if (!transactionId || task.recovery?.state === 'rolled_back' || (outcome === 'commit' && task.recovery?.state === 'committed')) return;
-  if (task.recovery?.state === 'active') {
+  const recovery = task.recovery;
+  const transactionId = recovery?.transactionId;
+  if (!recovery || !transactionId || recovery.state === 'rolled_back' || (outcome === 'commit' && recovery.state === 'committed')) return;
+  if (recovery.state === 'active') {
     const prepared = await bridgeCall('/recovery/prepare', {transactionId});
-    task.recovery.state = recoveryState(prepared);
-    if (!prepared?.ok || task.recovery.state !== 'prepared') {
-      task.recovery.error = prepared?.stderr || prepared?.transaction?.error || 'Could not persist recovery after-state';
+    recovery.state = recoveryState(prepared);
+    if (!prepared?.ok || recovery.state !== 'prepared') {
+      recovery.error = prepared?.stderr || prepared?.transaction?.error || 'Could not persist recovery after-state';
       saveTasks(); announceTask(task);
-      throw new Error(`AgentOS prepare failed: ${task.recovery.error}`);
+      throw new Error(`AgentOS prepare failed: ${recovery.error}`);
     }
   }
-  const operation = outcome === 'rollback' && task.recovery?.state === 'recovery_required' ? 'recover' : outcome;
+  const operation = outcome === 'rollback' && recovery.state === 'recovery_required' ? 'recover' : outcome;
   if (operation === 'recover' && !options.assumeExclusive) {
     throw new Error('中断事务需要显式确认：恢复范围内没有其它进程在事务后写入');
   }
   const result = await bridgeCall(`/recovery/${operation}`, {transactionId});
-  task.recovery.state = recoveryState(result);
-  task.recovery.error = result?.transaction?.error || result?.stderr || undefined;
+  recovery.state = recoveryState(result);
+  recovery.error = result?.transaction?.error || result?.stderr || undefined;
   appendJournal({
-    line: `${task.id} RECOVERY_${outcome.toUpperCase()} ${transactionId} state=${task.recovery.state}`,
+    line: `${task.id} RECOVERY_${outcome.toUpperCase()} ${transactionId} state=${recovery.state}`,
     tier: 1, kind: 'recovery', taskId: task.id,
     decision: result?.ok ? 'info' : 'denied',
   });
   saveTasks(); announceTask(task);
   const expected = outcome === 'commit' ? 'committed' : 'rolled_back';
-  if (!result?.ok || task.recovery.state !== expected) {
-    throw new Error(`AgentOS ${outcome} did not complete: ${task.recovery.error || task.recovery.state}`);
+  if (!result?.ok || recovery.state !== expected) {
+    throw new Error(`AgentOS ${outcome} did not complete: ${recovery.error || recovery.state}`);
   }
   if (outcome === 'commit') {
     const gc = await bridgeCall('/recovery/gc', {maxTransactions: 20, maxAgeDays: 7, maxBytes: 5 * 1024 * 1024 * 1024}, true);
@@ -2725,7 +2731,7 @@ async function healthTick() {
     try {
       const active = config && check.url.startsWith(heartbeatUrl({provider: config.provider, endpoint: config.endpoint}));
       const provider = config?.provider.toLowerCase() || '';
-      const headers = active && config?.apiKey
+      const headers: Record<string, string> | undefined = active && config?.apiKey
         ? provider.includes('anthropic')
           ? {'x-api-key': config.apiKey}
           : {authorization: `Bearer ${config.apiKey}`}
@@ -2809,7 +2815,7 @@ async function processFileChange(path: string, kind: string) {
     const memoryItem = await memory.upsertSimilar({text:`文件变化 ${path}：${content.slice(0, 1200)}`, category:'reference', importance:0.45, sourceConv:`filewatch:${item.id}`});
     broadcast({type:'memory.changed'});
     const impulse = proactive.manualImpulse({type:'file_change', reason:`我阅读了变化的文件 ${path}`, topicKey:`file:${path}`});
-    const log = proactive.markDelivered(impulse, `文件已更新：${path}\n${decision.reason}\n已索引为参考记忆 ${memoryItem.id}`, 'log');
+    const log = proactive.markDelivered(impulse, `文件已更新：${path}\n${decision.reason}\n已索引为参考记忆 ${memoryItem.item.id}`, 'log');
     broadcast({type:'proactive.impulse', item:log});
   } catch (error) { item.decision='failed'; item.reason=error instanceof Error ? error.message : String(error); emitFileWatch(item); }
 }
@@ -3558,7 +3564,7 @@ async function deliverProactive(input: {body: string; type: string; reason: stri
   if (!bridgeReady()) await notify(config?.personaName || 'Pattern', input.body);
   await telegramSend(input.body);
   await emailSend(`${config?.personaName || 'Pattern'} · ${input.origin === 'ai' ? '主动消息' : '提醒'}`, input.body);
-  await sendToPlugins(input.body, input.origin === 'ai' ? 'proactive' : 'notification');
+  await sendToPlugins(input.body, input.origin === 'ai' ? 'proactive' : 'task');
   lastProactiveInjectAt = Date.now();
   broadcast({type: 'proactive.impulse', item});
   broadcast({type: 'proactive.inbox.updated', item});
@@ -3678,11 +3684,11 @@ async function runComputerUseTask(task: TaskRecord) {
     const receipts: string[] = [];
     let completed = false;
     for (let iteration = 0; iteration < 20; iteration++) {
-      while (task.status === 'paused') {
+      while ((task.status as TaskRecord['status']) === 'paused') {
         setAgentState('paused');
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
-      if (task.status === 'cancelled') {
+      if ((task.status as TaskRecord['status']) === 'cancelled') {
         await finalizeTaskRecovery(task, 'rollback');
         finishTaskRun(task, 'cancelled'); saveTasks(); announceTask(task);
         setAgentState('idle');
@@ -3898,7 +3904,7 @@ async function handleClient(socket: TransportSocket, message: ClientMessage) {
         break;
       }
 case 'journal.list': {
-        send(socket, {type: 'journal.list.result', id: message.id, items: listJournal(message.limit ?? 80, (message as any).query)});
+        send(socket, {type: 'journal.list.result', id: message.id, items: listJournal(message.limit ?? 80, (message as any).query) as AuditEntry[]});
         break;
       }
       case 'security.policy.get': {

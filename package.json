@@ -11,6 +11,7 @@
     "maui:mac": "dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-maccatalyst",
     "sidecar:build": "pnpm --dir sidecar build",
     "sidecar:binary": "pnpm --dir sidecar build:binary",
+    "sidecar:typecheck": "pnpm --dir sidecar exec tsc --noEmit",
     "sidecar:test": "pnpm --dir sidecar test",
     "build:all": "pnpm sidecar:build",
     "test": "pnpm sidecar:test"

@@ -58,11 +58,15 @@ export function discoverChannelPlugins(pluginRoot: string): DiscoveredChannelPlu
     try {
       const value = JSON.parse(readFileSync(manifestFile, 'utf8')) as Partial<ChannelPluginManifest>;
       if (!PLUGIN_ID.test(String(value.id || '')) || !value.name?.trim() || !value.version?.trim() || !value.entry?.trim()) continue;
-      const entryPath = pluginPathInside(directory, value.entry);
-      if (!entryPath || !existsSync(entryPath) || seen.has(value.id)) continue;
-      seen.add(value.id);
+      const id = String(value.id);
+      const nameValue = value.name.trim();
+      const version = value.version.trim();
+      const entry = value.entry.trim();
+      const entryPath = pluginPathInside(directory, entry);
+      if (!entryPath || !existsSync(entryPath) || seen.has(id)) continue;
+      seen.add(id);
       plugins.push({
-        manifest: {id: value.id, name: value.name.trim(), version: value.version.trim(), entry: value.entry.trim(), description: value.description?.trim() || undefined},
+        manifest: {id, name: nameValue, version, entry, description: value.description?.trim() || undefined},
         directory,
         entryPath,
       });
