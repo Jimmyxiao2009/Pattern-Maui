@@ -10,11 +10,11 @@
 
 | 层 | MAUI 迁移后的职责 | 现状 |
 | --- | --- | --- |
-| UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 已有原生导航壳和首批请求 |
+| UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 原生导航壳、OOBE、聊天、项目/会话/记忆/目标/任务/主动/技能/工作流/MCP/通道/模型/监控/审计/设置页已接入；复杂原生窗口仍按平台补齐 |
 | Client services | `SidecarRuntime`、relay、会话/项目缓存、平台适配器 | stdio 生命周期和重连已完成 |
 | Agent runtime | 模型循环、记忆、主动任务、技能、MCP、渠道、审计 | 继续复用并修复 TypeScript sidecar |
-| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | 待分阶段实现 |
-| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | sidecar 已有基础实现，MAUI 配置/密钥存储待补齐 |
+| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power 和明确能力回退；Android 前台 relay 同步与通知权限已接入；tray/hotkey/真实输入截图/macOS 菜单栏需真机阶段 |
+| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor 已接入，sidecar 策略/审计/恢复能力已统一 |
 
 ## 分阶段交付
 
@@ -69,6 +69,14 @@
 4. 请求无统一超时/断线清理会造成页面永久 loading；`RequestAsync` 增加超时，断线统一结束 pending waiter。
 5. Android 不能直接运行 Node sidecar；明确 relay-only 状态和配对错误，避免假装本地 Agent 已启动。
 6. 当前 `dotnet run` 在无桌面会话的构建环境出现 Windows App SDK `0xC000027B`，不等同于 sidecar 连接失败；CI 以 build + stdio 集成为准，真实桌面机执行 GUI smoke test。
+
+## 当前可运行验收（2026-07-18）
+
+- `pnpm sidecar:test`：stdio、memory、relay、channels、computer-use、e2e、路由测试通过；Windows relay 测试结束时的 `UV_HANDLE_CLOSING` 是 Node teardown 已知噪声，测试 runner 已按 4 个断言通过处理。
+- `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
+- `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
+- Windows/macOS 运行时均使用 sidecar stdio；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，不要求用户访问 `127.0.0.1`。
+- 生成目录只用于本地构建，提交前执行仓库根目录的清理命令，归档目录 `archive/` 保持只读源码。
 
 ## 每阶段完成定义
 

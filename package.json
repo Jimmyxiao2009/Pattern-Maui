@@ -5,7 +5,9 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "maui:windows": "pnpm sidecar:build && dotnet run --project apps/maui/Pattern.Maui.csproj -f net10.0-windows10.0.19041.0",
+    "maui:windows:debug": "pnpm sidecar:build && dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-windows10.0.19041.0 --no-restore -p:Configuration=Debug",
     "maui:android": "dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-android",
+    "maui:android:debug": "dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-android --no-restore -p:Configuration=Debug",
     "maui:mac": "dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-maccatalyst",
     "sidecar:build": "pnpm --dir sidecar build",
     "sidecar:binary": "pnpm --dir sidecar build:binary",
