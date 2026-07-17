@@ -21,6 +21,7 @@ public partial class MainPage : ContentPage
     private readonly NativeBridgeService _bridge;
     private readonly SingleInstanceService _instance;
     private readonly GlobalHotkeyService _hotkey;
+    private readonly WindowsTrayService _tray;
     private readonly List<ChatTurn> _history = [];
     private readonly Dictionary<string, View> _views = [];
     private Label? _conversationLabel;
@@ -31,7 +32,7 @@ public partial class MainPage : ContentPage
     private string _activeAssistantText = string.Empty;
     private bool _loaded;
 
-    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey)
+    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey, WindowsTrayService tray)
     {
         InitializeComponent();
         _runtime = runtime;
@@ -40,11 +41,17 @@ public partial class MainPage : ContentPage
         _bridge = bridge;
         _instance = instance;
         _hotkey = hotkey;
+        _tray = tray;
         LoadHistory();
         _hotkey.QuickChatRequested += () => MainThread.BeginInvokeOnMainThread(() =>
         {
             ShowView("chat");
             StatusLabel.Text = "快捷窗口已打开（Ctrl+Alt+P）";
+            _messageEntry?.Focus();
+        });
+        _tray.ShowRequested += () => MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ShowView("chat");
             _messageEntry?.Focus();
         });
 

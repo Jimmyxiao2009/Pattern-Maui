@@ -13,8 +13,8 @@
 | UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 原生导航壳、OOBE、聊天、项目/会话/记忆/目标/任务/主动/技能/工作流/MCP/通道/模型/监控/审计/设置页已接入；复杂原生窗口仍按平台补齐 |
 | Client services | `SidecarRuntime`、relay、会话/项目缓存、平台适配器 | stdio 生命周期和重连已完成 |
 | Agent runtime | 模型循环、记忆、主动任务、技能、MCP、渠道、审计 | 继续复用并修复 TypeScript sidecar |
-| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power、Win32 输入、截图、窗口控件树/动作、冻结和提示；单实例保护已接入；tray/hotkey 外壳与 macOS 菜单栏仍需对应平台真机阶段 |
-| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor 已接入，sidecar 策略/审计/恢复能力已统一 |
+| Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power、Win32 输入、截图、窗口控件树/动作、冻结、tray balloon 和提示；Win32 tray、Ctrl+Alt+P、单实例保护已接入；macOS 菜单栏仍需 Catalyst 真机阶段 |
+| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor 已接入；Win32 bridge 提供受限文件快照 recovery begin/prepare/commit/rollback/gc |
 
 ## 分阶段交付
 
@@ -76,7 +76,7 @@
 - `pnpm sidecar:typecheck`：sidecar 与 workspace packages 的 TypeScript strict 检查通过；workspace alias、MCP、recovery、proactive 和 channel 类型已对齐。
 - `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
 - `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
-- Windows/macOS 运行时均使用 sidecar stdio；Windows 提供 Ctrl+Alt+P 快捷聊天入口和单实例保护；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，并支持 `pattern://pair` 深链接配对，不要求用户访问 `127.0.0.1`。
+- Windows/macOS 运行时均使用 sidecar stdio；Windows 提供 tray、Ctrl+Alt+P 快捷聊天入口、单实例保护和本地恢复快照；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，并支持 `pattern://pair` 深链接配对，不要求用户访问 `127.0.0.1`。
 - 生成目录只用于本地构建，提交前执行仓库根目录的清理命令，归档目录 `archive/` 保持只读源码。
 
 ## 每阶段完成定义

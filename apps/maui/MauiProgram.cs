@@ -9,9 +9,15 @@ public static class MauiProgram
     {
         var builder = MauiApp.CreateBuilder();
         builder.UseMauiApp<App>();
-        builder.Services.AddSingleton<NativeBridgeService>(_ =>
+        builder.Services.AddSingleton<WindowsTrayService>(_ =>
         {
-            var bridge = new NativeBridgeService();
+            var tray = new WindowsTrayService();
+            tray.Start();
+            return tray;
+        });
+        builder.Services.AddSingleton<NativeBridgeService>(services =>
+        {
+            var bridge = new NativeBridgeService(services.GetRequiredService<WindowsTrayService>());
             bridge.Start();
             return bridge;
         });

@@ -17,12 +17,17 @@ namespace Pattern.Maui.Services;
 /// </summary>
 public sealed class NativeBridgeService : IAsyncDisposable
 {
+    private readonly WindowsTrayService? _tray;
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly string _token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)).TrimEnd('=');
     private Task? _loop;
     private bool _started;
     private int _port;
+    private readonly SemaphoreSlim _recoveryGate = new(1, 1);
+    private string RecoveryRoot => Path.Combine(FileSystem.AppDataDirectory, "recovery");
+
+    public NativeBridgeService(WindowsTrayService? tray = null) => _tray = tray;
 
     public string? Url => _started ? $"http://127.0.0.1:{_port}" : null;
     public string Token => _token;
@@ -90,8 +95,14 @@ public sealed class NativeBridgeService : IAsyncDisposable
                 "/input" => Input(requestBody),
                 "/freeze" => Freeze(requestBody),
                 "/notify" => Notify(requestBody),
-                "/recovery/capabilities" => new { available = false, store = "maui" },
-                "/recovery/list" => new { transaction = Array.Empty<object>() },
+                "/recovery/capabilities" => RecoveryCapabilities(),
+                "/recovery/list" => await RecoveryListAsync(),
+                "/recovery/begin" => await RecoveryBeginAsync(requestBody),
+                "/recovery/prepare" => await RecoveryPrepareAsync(requestBody),
+                "/recovery/commit" => await RecoveryFinishAsync(requestBody, "committed"),
+                "/recovery/rollback" => await RecoveryRollbackAsync(requestBody, "rolled_back"),
+                "/recovery/recover" => await RecoveryRollbackAsync(requestBody, "rolled_back"),
+                "/recovery/gc" => await RecoveryGcAsync(requestBody),
                 _ => null,
             };
             if (payload is null)
@@ -251,12 +262,13 @@ public sealed class NativeBridgeService : IAsyncDisposable
 #endif
     }
 
-    private static object Notify(JsonElement? request)
+    private object Notify(JsonElement? request)
     {
 #if WINDOWS
         if (!OperatingSystem.IsWindows() || request is null) return Unsupported("notify");
         var title = request.Value.TryGetProperty("title", out var titleValue) ? titleValue.GetString() : "Pattern";
         var body = request.Value.TryGetProperty("body", out var bodyValue) ? bodyValue.GetString() : string.Empty;
+        _tray?.Notify(title ?? "Pattern", body ?? string.Empty);
         MessageBeep(0x00000040);
         var foreground = GetForegroundWindow();
         if (foreground != IntPtr.Zero) FlashWindow(foreground, true);
@@ -264,6 +276,191 @@ public sealed class NativeBridgeService : IAsyncDisposable
 #else
         return new { ok = true, delivered = false, supported = false };
 #endif
+    }
+
+    private object RecoveryCapabilities() => new
+    {
+        available = !OperatingSystem.IsAndroid(),
+        store = OperatingSystem.IsAndroid() ? "unavailable" : RecoveryRoot,
+        mode = "best-effort-file-snapshot",
+        maxBytes = RecoveryManifest.MaxBytes,
+    };
+
+    private async Task<object> RecoveryListAsync()
+    {
+        await _recoveryGate.WaitAsync();
+        try
+        {
+            if (OperatingSystem.IsAndroid()) return new { ok = false, available = false, transaction = Array.Empty<object>() };
+            var manifests = new List<RecoveryManifest>();
+            if (Directory.Exists(RecoveryRoot))
+            {
+                foreach (var file in Directory.EnumerateFiles(RecoveryRoot, "manifest.json", SearchOption.AllDirectories))
+                {
+                    try { var manifest = JsonSerializer.Deserialize<RecoveryManifest>(File.ReadAllText(file)); if (manifest is not null) manifests.Add(manifest); } catch { }
+                }
+            }
+            return new { ok = true, available = true, transaction = manifests.OrderByDescending(item => item.CreatedAt).ToArray() };
+        }
+        finally { _recoveryGate.Release(); }
+    }
+
+    private async Task<object> RecoveryBeginAsync(JsonElement? request)
+    {
+        if (OperatingSystem.IsAndroid()) return new { ok = false, error = "recovery unavailable on Android" };
+        await _recoveryGate.WaitAsync();
+        try
+        {
+            var scopes = ReadStringArray(request, "fileScopes")
+                .Select(Path.GetFullPath)
+                .Where(Directory.Exists)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(3)
+                .ToArray();
+            if (scopes.Length == 0) return new { ok = false, error = "no existing file scope declared" };
+            var id = Guid.NewGuid().ToString("N");
+            var directory = Path.Combine(RecoveryRoot, id);
+            var before = Path.Combine(directory, "before");
+            Directory.CreateDirectory(before);
+            var files = new List<RecoveryFile>();
+            long bytes = 0;
+            foreach (var scope in scopes)
+            {
+                foreach (var source in EnumerateSnapshotFiles(scope))
+                {
+                    var info = new FileInfo(source);
+                    if (!info.Exists || info.Length > RecoveryManifest.MaxBytes - bytes) break;
+                    var relative = Path.GetRelativePath(scope, source);
+                    var snapshot = Path.Combine(before, scopes.ToList().IndexOf(scope).ToString(), relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(snapshot)!);
+                    File.Copy(source, snapshot, true);
+                    files.Add(new RecoveryFile(source, snapshot, info.Length));
+                    bytes += info.Length;
+                    if (files.Count >= RecoveryManifest.MaxFiles || bytes >= RecoveryManifest.MaxBytes) break;
+                }
+                if (files.Count >= RecoveryManifest.MaxFiles || bytes >= RecoveryManifest.MaxBytes) break;
+            }
+            var manifest = new RecoveryManifest
+            {
+                Id = id,
+                State = "active",
+                FileScopes = scopes,
+                Files = files,
+                CreatedAt = DateTimeOffset.UtcNow,
+                Command = request is { } body && body.TryGetProperty("taskId", out var task) ? $"detached:{task.GetString()}" : "detached:maui",
+                Bytes = bytes,
+            };
+            SaveManifest(manifest, directory);
+            return new { ok = true, transaction = manifest };
+        }
+        catch (Exception error) { return new { ok = false, error = error.Message }; }
+        finally { _recoveryGate.Release(); }
+    }
+
+    private async Task<object> RecoveryPrepareAsync(JsonElement? request)
+    {
+        return await RecoveryMutateAsync(request, manifest => { if (manifest.State == "active") manifest.State = "prepared"; });
+    }
+
+    private async Task<object> RecoveryFinishAsync(JsonElement? request, string state)
+    {
+        return await RecoveryMutateAsync(request, manifest => manifest.State = state);
+    }
+
+    private async Task<object> RecoveryRollbackAsync(JsonElement? request, string state)
+    {
+        return await RecoveryMutateAsync(request, manifest =>
+        {
+            foreach (var file in manifest.Files)
+            {
+                try { if (File.Exists(file.Snapshot)) { Directory.CreateDirectory(Path.GetDirectoryName(file.Source)!); File.Copy(file.Snapshot, file.Source, true); } } catch { }
+            }
+            manifest.State = state;
+        });
+    }
+
+    private async Task<object> RecoveryMutateAsync(JsonElement? request, Action<RecoveryManifest> mutate)
+    {
+        await _recoveryGate.WaitAsync();
+        try
+        {
+            var id = request is { } body && body.TryGetProperty("transactionId", out var value) ? value.GetString() : null;
+            var manifest = !string.IsNullOrWhiteSpace(id) ? LoadManifest(id!) : null;
+            if (manifest is null) return new { ok = false, error = "transaction not found" };
+            mutate(manifest);
+            SaveManifest(manifest, Path.Combine(RecoveryRoot, manifest.Id));
+            return new { ok = true, transaction = manifest };
+        }
+        finally { _recoveryGate.Release(); }
+    }
+
+    private async Task<object> RecoveryGcAsync(JsonElement? request)
+    {
+        await _recoveryGate.WaitAsync();
+        try
+        {
+            var purged = new List<string>();
+            if (Directory.Exists(RecoveryRoot))
+            {
+                foreach (var directory in Directory.EnumerateDirectories(RecoveryRoot))
+                {
+                    var manifest = LoadManifest(Path.GetFileName(directory));
+                    if (manifest is null || (manifest.State is not ("committed" or "rolled_back"))) continue;
+                    if (DateTimeOffset.UtcNow - manifest.CreatedAt < TimeSpan.FromDays(7)) continue;
+                    try { Directory.Delete(directory, true); purged.Add(manifest.Id); } catch { }
+                }
+            }
+            return new { ok = true, transaction = new { purgedTransactionIds = purged, bytesAfter = 0 } };
+        }
+        finally { _recoveryGate.Release(); }
+    }
+
+    private RecoveryManifest? LoadManifest(string id)
+    {
+        try
+        {
+            var file = Path.Combine(RecoveryRoot, id, "manifest.json");
+            return File.Exists(file) ? JsonSerializer.Deserialize<RecoveryManifest>(File.ReadAllText(file)) : null;
+        }
+        catch { return null; }
+    }
+
+    private static void SaveManifest(RecoveryManifest manifest, string directory)
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static IEnumerable<string> ReadStringArray(JsonElement? request, string property)
+    {
+        if (request is not { } body || !body.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Array) return [];
+        return value.EnumerateArray().Select(item => item.GetString() ?? string.Empty).Where(item => !string.IsNullOrWhiteSpace(item));
+    }
+
+    private static IEnumerable<string> EnumerateSnapshotFiles(string root)
+    {
+        var ignored = new[] { "node_modules", ".git", "bin", "obj", "dist", ".tmp" };
+        IEnumerable<string> files;
+        try { files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories); } catch { yield break; }
+        foreach (var file in files)
+        {
+            if (ignored.Any(part => file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains(part, StringComparer.OrdinalIgnoreCase))) continue;
+            yield return file;
+        }
+    }
+
+    private sealed record RecoveryFile(string Source, string Snapshot, long Bytes);
+    private sealed class RecoveryManifest
+    {
+        public const int MaxFiles = 2000;
+        public const long MaxBytes = 128 * 1024 * 1024;
+        public string Id { get; set; } = string.Empty;
+        public string State { get; set; } = "active";
+        public string[] FileScopes { get; set; } = [];
+        public List<RecoveryFile> Files { get; set; } = [];
+        public DateTimeOffset CreatedAt { get; set; }
+        public string Command { get; set; } = string.Empty;
+        public long Bytes { get; set; }
     }
 
     private static object Unsupported(string capability) => new { ok = false, supported = false, error = $"{capability} provider unavailable" };
