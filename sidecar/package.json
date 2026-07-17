@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --external:@huggingface/transformers --external:better-sqlite3 --external:nodemailer --external:imapflow --external:mailparser --outfile=dist/index.cjs ",
-    "build:binary": "bun build src/index.ts --compile --outfile=dist/pattern-sidecar",
+    "build:binary": "node -e \"console.error('pattern-sidecar Bun binary is experimental and broken with better-sqlite3 (B:/~BUN/root module root). Use pnpm build + Node, or set PATTERN_SIDECAR_PATH only for experiments.'); process.exit(1)\"",
+    "build:binary:experimental": "bun build src/index.ts --compile --outfile=dist/pattern-sidecar",
     "test": "pnpm build && node scripts/run-tests.mjs"
   },
   "dependencies": {

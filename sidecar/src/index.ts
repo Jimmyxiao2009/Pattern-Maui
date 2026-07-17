@@ -3652,6 +3652,10 @@ async function runComputerUseTask(task: TaskRecord) {
       return;
     }
     if (!bridgeReady()) throw new Error('OS Bridge 未连接，不会模拟执行');
+    // A prior task may have left a system safety freeze behind after a denied
+    // action. Clear only that safety latch; a user emergency stop is separate
+    // and remains enforced by the Bridge.
+    await bridgeCall('/freeze', {frozen: false}, true);
     const initialTier = classifyTaskTier(task.title, task.detail || '');
     if (initialTier >= 3) throw new Error('T3 任务涉及银行或密码管理器，已拒绝执行');
     task.riskTier = initialTier;
@@ -3773,6 +3777,7 @@ async function runComputerUseTask(task: TaskRecord) {
     } catch (rollbackError) {
       recoveryError = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
     }
+    try { if (bridgeReady()) await bridgeCall('/freeze', {frozen: false}, true); } catch { /* preserve the original task error */ }
     task.status = 'failed';
     task.error = error instanceof Error ? error.message : String(error);
     if (recoveryError) task.error += `\nRecovery: ${recoveryError}`;
@@ -4522,7 +4527,7 @@ async function decideComputerAction(task: TaskRecord, screenshotBase64: string, 
   const anthropic = provider.toLowerCase().includes('anthropic');
   const vision=config.executor?.vision!==false;
   const plan = task.plan?.filter((step) => step.enabled).map((step, index) => `${index + 1}. ${step.title}: ${step.detail}`).join('\n') || '(no explicit step list; infer the task from its details)';
-  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nWorkspace: ${task.workspace || task.workflow?.workspace || '(none)'}\nOrdered automation steps (follow in order; do not skip or reorder):\n${plan}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. To open the Windows Start menu, return {"type":"key","key":"win","reason":"open Start menu"}. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
+  const instruction = `You control a desktop to complete this task: ${task.title}\nDetails: ${task.detail || '(none)'}\nWorkspace: ${task.workspace || task.workflow?.workspace || '(none)'}\nOrdered automation steps (follow in order; do not skip or reorder):\n${plan}\nForeground window: ${foregroundTitle||'(unknown)'}\nRecent receipts:\n${history.slice(-6).join('\n')}\nAccessible controls from the foreground window:\n${JSON.stringify(controls).slice(0,18000)}\nPrefer uiaInvoke for buttons/menu items and uiaSetValue for editable fields. Prefer the foreground window and UIA tree over Alt+Tab; only use an Alt+Tab chord when the target window is not already foreground and no UIA/focus action can select it. To open the Windows Start menu, return {"type":"key","key":"win","reason":"open Start menu"}. ${vision?'Use the control ref and include x/y as visual fallback when possible. Otherwise choose click,type,key,scroll,wait,done,fail. Never claim done unless the screenshot visibly proves the result.':'This is accessibility-only mode: no screenshot is available. Never invent coordinates. Use uiaInvoke/uiaSetValue or keyboard actions only. Infer completion only from control-tree state and receipts; if required controls are unavailable, return fail with a precise accessibility limitation.'} Return JSON only with type,ref,automationId,name,value,x,y,text,key,modifiers,amount,reason,tier. For key chords always use key as the final key and modifiers as an array, e.g. key="tab", modifiers=["alt"]; do not put "alt+tab" in key. Set tier 2 for destructive actions, external communication, uploads, installs, purchases or final submission; tier 3 for password managers or banking.`;
   const userContent:any=vision?[{type:'text',text:instruction},{type:'image',source:{type:'base64',media_type:'image/png',data:screenshotBase64}}]:instruction;
   const openAiContent:any=vision?[{type:'text',text:instruction},{type:'image_url',image_url:{url:`data:image/png;base64,${screenshotBase64}`}}]:instruction;
   const response = await fetch(endpoint(anthropic ? '/messages' : '/chat/completions', base), anthropic ? {
@@ -4538,6 +4543,13 @@ async function decideComputerAction(task: TaskRecord, screenshotBase64: string, 
   const text = anthropic ? json.content?.map((x:any)=>x.text).join('') : json.choices?.[0]?.message?.content;
   const parsed = JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0] || '{}') as ComputerAction;
   if (!['uiaInvoke','uiaSetValue','click','type','key','scroll','wait','done','fail'].includes(parsed.type)) throw new Error('模型返回了无效的桌面动作');
+  if (parsed.type === 'key' && typeof parsed.key === 'string' && parsed.key.includes('+')) {
+    const parts = parsed.key.split('+').map((item) => item.trim().toLowerCase()).filter(Boolean);
+    const primary = parts.pop();
+    if (!primary) throw new Error('模型返回了空组合键');
+    parsed.key = primary;
+    parsed.modifiers = [...(parsed.modifiers || []), ...parts];
+  }
   parsed.reason = String(parsed.reason || parsed.type).slice(0,500);
   parsed.tier = Math.max(actionTier(parsed), Number(parsed.tier) || 0);
   return parsed;

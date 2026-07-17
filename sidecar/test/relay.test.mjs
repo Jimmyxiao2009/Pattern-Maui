@@ -24,27 +24,6 @@ function loadRelay(dir) {
   return require(outfile);
 }
 
-function loadMobileRelay(dir) {
-  const entry = fileURLToPath(new URL('../../apps/mobile/src/lib/relay.ts', import.meta.url));
-  const outfile = join(dir, 'mobile-relay.cjs');
-  buildSync({entryPoints:[entry], bundle:true, platform:'browser', format:'cjs', target:'es2022', outfile});
-  return createRequire(import.meta.url)(outfile);
-}
-
-test('desktop and mobile AES-GCM wire formats interoperate', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pattern-relay-crypto-'));
-  try {
-    globalThis.crypto ??= webcrypto;
-    const desktop = loadRelay(dir);
-    const mobile = loadMobileRelay(dir);
-    const secret = 'cross-device-test-key';
-    assert.equal(await mobile.decrypt(desktop.encryptBody('desktop to mobile', secret), secret), 'desktop to mobile');
-    assert.equal(desktop.decryptBody(await mobile.encrypt('mobile to desktop', secret), secret), 'mobile to desktop');
-  } finally {
-    rmSync(dir, {recursive:true, force:true});
-  }
-});
-
 test('X25519 pairing wraps credentials with XChaCha20-Poly1305',()=>{const dir=mkdtempSync(join(tmpdir(),'pattern-pairing-'));try{const {createSecurePairingRequest,createSecurePairingResponse,openSecurePairingResponse}=loadRelay(dir);const request=createSecurePairingRequest('mobile-1');const payload={webdavUrl:'https://dav.test',username:'u',password:'p',channelKey:'secret'};const response=createSecurePairingResponse(request.code,payload,'desktop-1');assert.deepEqual(openSecurePairingResponse(response.code,request.privateKey),payload);assert.equal(response.code.includes('secret'),false);assert.throws(()=>openSecurePairingResponse(response.code,createSecurePairingRequest('attacker').privateKey));}finally{rmSync(dir,{recursive:true,force:true})}});
 
 test('local relay publish/list/pull with cursor dedupe', async () => {

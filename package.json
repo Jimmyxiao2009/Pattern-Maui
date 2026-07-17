@@ -4,22 +4,12 @@
   "version": "0.3.0",
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "dev": "pnpm --dir apps/desktop dev",
-    "build": "pnpm --dir apps/desktop build",
-    "check": "pnpm --dir apps/desktop check",
-    "tauri": "pnpm --dir apps/desktop tauri",
-    "mobile:dev": "pnpm --dir apps/mobile dev",
-    "mobile:build": "pnpm --dir apps/mobile build",
-    "mobile:check": "pnpm --dir apps/mobile check",
-    "mobile:android:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1",
+    "maui:windows": "dotnet run --project apps/maui/Pattern.Maui.csproj -f net10.0-windows10.0.19041.0",
     "sidecar:build": "pnpm --dir sidecar build",
     "sidecar:binary": "pnpm --dir sidecar build:binary",
-    "sidecar:bundle:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-sidecar-windows.ps1",
-    "agentos:bundle:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-agentos.ps1",
-    "desktop:build:windows": "pnpm --dir apps/desktop tauri build --config src-tauri/tauri.agentos.windows.conf.json",
-    "build:all": "pnpm sidecar:build && pnpm build",
-    "test": "pnpm --dir sidecar test && pnpm check && pnpm mobile:check",
-    "test:ui": "node tests/run-ui.mjs"
+    "sidecar:test": "pnpm --dir sidecar test",
+    "build:all": "pnpm sidecar:build",
+    "test": "pnpm sidecar:test"
   },
   "devDependencies": {
     "playwright-core": "^1.61.1"

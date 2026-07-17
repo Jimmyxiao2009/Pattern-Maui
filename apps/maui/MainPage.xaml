@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Pattern.Maui.MainPage"
+             BackgroundColor="{StaticResource PageBackground}">
+    <Grid Padding="24" RowDefinitions="Auto,*,Auto" RowSpacing="16">
+        <Grid ColumnDefinitions="*,Auto">
+            <VerticalStackLayout Spacing="2">
+                <Label Text="Pattern" FontSize="28" FontAttributes="Bold" />
+                <Label x:Name="StatusLabel" Text="正在启动本地运行时…" TextColor="#9BA8BD" />
+            </VerticalStackLayout>
+            <Button Grid.Column="1" Text="重连" Clicked="OnReconnectClicked" />
+        </Grid>
+        <Border Grid.Row="1" BackgroundColor="{StaticResource PanelBackground}" StrokeThickness="0" StrokeShape="RoundRectangle 14" Padding="18">
+            <ScrollView>
+                <Label x:Name="ConversationLabel" Text="欢迎回来。MAUI 客户端不依赖浏览器访问本地地址。" LineBreakMode="WordWrap" FontSize="16" />
+            </ScrollView>
+        </Border>
+        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <Entry x:Name="MessageEntry" Placeholder="给 Pattern 发消息" ReturnType="Send" Completed="OnSendCompleted" />
+            <Button Grid.Column="1" Text="发送" Clicked="OnSendClicked" BackgroundColor="{StaticResource Accent}" TextColor="#101827" />
+        </Grid>
+    </Grid>
+</ContentPage>
