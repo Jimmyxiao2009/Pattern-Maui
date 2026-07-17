@@ -27,10 +27,12 @@ public sealed class RelayService
     private const string DeviceKey = "pattern.relay.device";
     private const string ChannelKey = "pattern.relay.channel";
     private const string PasswordKey = "pattern.relay.password";
+    private const string PairingPrivateKey = "pattern.relay.pairing-private";
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly HashSet<string> _seen = [];
     private List<RelayEnvelope> _outbox = [];
+    private List<RelayEnvelope> _inbox = [];
     private RelaySettings _settings = new("", "", "", "", Guid.NewGuid().ToString("N"));
     private DateTimeOffset? _lastSync;
     private string? _lastError;
@@ -46,17 +48,73 @@ public sealed class RelayService
 
     public RelaySettings CurrentSettings => _settings;
 
+    /// <summary>Returns messages received by a background relay worker since the UI last opened.</summary>
+    public IReadOnlyList<RelayEnvelope> DrainInbox()
+    {
+        var result = _inbox.OrderBy(item => item.Ts).ThenBy(item => item.Id).ToArray();
+        _inbox.Clear();
+        SaveLocalState();
+        return result;
+    }
+
     public async Task<bool> ConsumePendingPairingAsync()
     {
         var raw = Preferences.Default.Get("pattern.pending.pairing", string.Empty);
         if (string.IsNullOrWhiteSpace(raw)) return false;
         try
         {
-            await SaveSettingsAsync(ParsePairingCode(raw));
+            await ApplyPairingCodeAsync(raw);
             Preferences.Default.Remove("pattern.pending.pairing");
             return true;
         }
         catch { return false; }
+    }
+
+    public async Task<RelaySettings> ApplyPairingCodeAsync(string raw)
+    {
+        var paired = await OpenSecurePairingResponseAsync(raw) ?? ParsePairingCode(raw);
+        await SaveSettingsAsync(paired);
+        return paired;
+    }
+
+    public async Task<string> CreateSecurePairingRequestAsync()
+    {
+        var request = PairingCryptoService.CreateRequest(_settings.DeviceId);
+        try { await SecureStorage.Default.SetAsync(PairingPrivateKey, request.PrivateKey); }
+        catch { throw new InvalidOperationException("系统安全存储不可用，无法保存配对私钥。"); }
+        return request.Code;
+    }
+
+    public string CreateSecurePairingResponse(string requestCode)
+    {
+        if (!_settings.IsConfigured) throw new InvalidOperationException("请先配置 WebDAV relay。");
+        return PairingCryptoService.CreateResponse(requestCode, new
+        {
+            version = 2,
+            webdavUrl = _settings.Url,
+            username = _settings.Username,
+            password = _settings.Password,
+            channelKey = _settings.ChannelKey,
+        }, _settings.DeviceId);
+    }
+
+    private async Task<RelaySettings?> OpenSecurePairingResponseAsync(string code)
+    {
+        string? privateKey;
+        try { privateKey = await SecureStorage.Default.GetAsync(PairingPrivateKey); }
+        catch { privateKey = null; }
+        if (string.IsNullOrWhiteSpace(privateKey)) return null;
+        try
+        {
+            var root = PairingCryptoService.OpenResponse(code, privateKey);
+            if (root.GetProperty("version").GetInt32() != 2) throw new InvalidOperationException("不支持的安全配对版本。");
+            var url = root.GetProperty("webdavUrl").GetString() ?? "";
+            var key = root.GetProperty("channelKey").GetString() ?? "";
+            if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("加密配对响应缺少必要字段。");
+            try { SecureStorage.Default.Remove(PairingPrivateKey); } catch { }
+            return new RelaySettings(url, root.TryGetProperty("username", out var user) ? user.GetString() ?? "" : "", root.TryGetProperty("password", out var pass) ? pass.GetString() ?? "" : "", key, Guid.NewGuid().ToString("N"));
+        }
+        catch { return null; }
     }
 
     public async Task SaveSettingsAsync(RelaySettings settings)
@@ -96,9 +154,14 @@ public sealed class RelayService
         return new RelaySettings(url, root.TryGetProperty("username", out var user) ? user.GetString() ?? "" : "", root.TryGetProperty("password", out var pass) ? pass.GetString() ?? "" : "", key, Guid.NewGuid().ToString("N"));
     }
 
-    public async Task PublishChatAsync(string body, CancellationToken cancellationToken = default)
+    public Task PublishChatAsync(string body, CancellationToken cancellationToken = default) =>
+        PublishEnvelopeAsync(new RelayEnvelope(Guid.NewGuid().ToString("N")[..26], _settings.DeviceId, "user", "chat", DateTimeOffset.UtcNow.ToUnixTimeSeconds(), body), cancellationToken);
+
+    public Task PublishTaskAsync(string title, string detail, CancellationToken cancellationToken = default) =>
+        PublishEnvelopeAsync(new RelayEnvelope(Guid.NewGuid().ToString("N")[..26], _settings.DeviceId, "user", "task", DateTimeOffset.UtcNow.ToUnixTimeSeconds(), JsonSerializer.Serialize(new { action = "create", title, detail })), cancellationToken);
+
+    private async Task PublishEnvelopeAsync(RelayEnvelope env, CancellationToken cancellationToken)
     {
-        var env = new RelayEnvelope(Guid.NewGuid().ToString("N")[..26], _settings.DeviceId, "user", "chat", DateTimeOffset.UtcNow.ToUnixTimeSeconds(), body);
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -120,7 +183,7 @@ public sealed class RelayService
         finally { _gate.Release(); }
     }
 
-    public async Task<IReadOnlyList<RelayEnvelope>> SyncAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<RelayEnvelope>> SyncAsync(CancellationToken cancellationToken = default, bool persistIncoming = true)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -161,6 +224,8 @@ public sealed class RelayService
             _online = true;
             _lastError = null;
             _lastSync = DateTimeOffset.UtcNow;
+            if (persistIncoming && incoming.Count > 0)
+                _inbox = _inbox.Concat(incoming).TakeLast(500).ToList();
             SaveLocalState();
             return incoming.OrderBy(item => item.Ts).ThenBy(item => item.Id).ToArray();
         }
@@ -232,8 +297,11 @@ public sealed class RelayService
             using var doc = JsonDocument.Parse(File.ReadAllText(StatePath));
             foreach (var id in doc.RootElement.GetProperty("seen").EnumerateArray()) _seen.Add(id.GetString() ?? "");
             _outbox = doc.RootElement.GetProperty("outbox").Deserialize<List<RelayEnvelope>>() ?? [];
+            _inbox = doc.RootElement.TryGetProperty("inbox", out var inbox)
+                ? inbox.Deserialize<List<RelayEnvelope>>() ?? []
+                : [];
         }
-        catch { _seen.Clear(); _outbox = []; }
+        catch { _seen.Clear(); _outbox = []; _inbox = []; }
     }
 
     private void SaveLocalState()
@@ -241,7 +309,7 @@ public sealed class RelayService
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
-            File.WriteAllText(StatePath, JsonSerializer.Serialize(new { seen = _seen.TakeLast(5000), outbox = _outbox }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(StatePath, JsonSerializer.Serialize(new { seen = _seen.TakeLast(5000), outbox = _outbox, inbox = _inbox.TakeLast(500) }, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { /* persistence errors must not crash the app */ }
     }

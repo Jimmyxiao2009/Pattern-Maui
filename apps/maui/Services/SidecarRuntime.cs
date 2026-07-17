@@ -48,6 +48,11 @@ public sealed class SidecarRuntime : IAsyncDisposable
         try
         {
             if (IsConnected) return;
+            // Mark the old transport as intentional before cancelling it. The
+            // receive loop checks this flag in its finally block; setting it
+            // only after StopCoreAsync can otherwise start a stale reconnect
+            // while the new sidecar is being spawned.
+            _intentionalStop = true;
             await StopCoreAsync();
             _intentionalStop = false;
             lock (_stderrTail) _stderrTail.Clear();
@@ -113,6 +118,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
         string text,
         IReadOnlyList<ChatTurn>? history = null,
         string? sessionId = null,
+        IReadOnlyList<string>? attachments = null,
         CancellationToken cancellationToken = default)
     {
         await EnsureConnectedAsync(cancellationToken);
@@ -124,6 +130,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
             text,
             history = history ?? Array.Empty<ChatTurn>(),
             sessionId,
+            attachments = attachments is { Count: > 0 } ? attachments : null,
         });
         await SendTextAsync(message, cancellationToken);
         return id;

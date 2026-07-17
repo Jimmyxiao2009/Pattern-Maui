@@ -10,11 +10,11 @@
 
 | 层 | MAUI 迁移后的职责 | 现状 |
 | --- | --- | --- |
-| UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 原生导航壳、OOBE、聊天、项目/会话/记忆/目标/任务/主动/技能/工作流/MCP/通道/模型/监控/审计/设置页已接入；复杂原生窗口仍按平台补齐 |
+| UI | Shell、导航、聊天、设置、功能页、无障碍和通知 | 原生导航壳、OOBE、聊天附件、项目文件树/文本预览、项目/会话/记忆/目标/任务/主动/技能/工作流/MCP/通道/模型配置/监控/审计/设置页已接入；复杂原生窗口仍按平台补齐 |
 | Client services | `SidecarRuntime`、relay、会话/项目缓存、平台适配器 | stdio 生命周期和重连已完成 |
 | Agent runtime | 模型循环、记忆、主动任务、技能、MCP、渠道、审计 | 继续复用并修复 TypeScript sidecar |
 | Native bridges | Windows tray/hotkey/input/accessibility/screenshot；Android 通知与后台同步；macOS 菜单栏 | Windows loopback bridge 已提供 foreground/idle/power、Win32 输入、截图、窗口控件树/动作、冻结、tray balloon 和提示；Win32 tray、Ctrl+Alt+P、单实例保护已接入；Catalyst 已加入 Pattern 菜单与 Cmd+Option+P 快捷入口 |
-| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor 已接入；Win32 bridge 提供受限文件快照 recovery begin/prepare/commit/rollback/gc |
+| Data/security | 本地数据目录、加密密钥、权限策略、迁移和备份 | MAUI Preferences + SecureStorage、relay AES-GCM outbox/cursor、X25519 + XChaCha20-Poly1305 配对已接入；Win32 bridge 提供受限文件快照 recovery begin/prepare/commit/rollback/gc |
 
 ## 分阶段交付
 
@@ -44,6 +44,7 @@
 ### Phase 3 — 渠道与设备互联
 
 - WebDAV relay 配对、设备密钥、AES-GCM envelope、X25519/XChaCha20、cursor/outbox/offline retry。
+- MAUI Android 支持深链、加密响应、后台前台服务和消息通知；桌面端可生成加密配对响应。
 - Telegram、SMTP、IMAP 和本地 channel plugin 管理。
 - Android 前台同步服务、通知点击回到会话、网络切换和后台重试。
 - 验收：断网期间消息进入 outbox，恢复网络后按 cursor 幂等同步。
@@ -72,11 +73,14 @@
 6. 当前 `dotnet run` 在无桌面会话的构建环境出现 Windows App SDK `0xC000027B`，不等同于 sidecar 连接失败；CI 以 build + stdio 集成为准，真实桌面机执行 GUI smoke test。
 7. 客户端设置页提供版本化 JSON 备份导入/导出，并迁移旧的无版本备份格式；API Key、WebDAV 密码和频道密钥永不进入备份。
 8. Agent 数据快照由 sidecar 统一生成和导入，MAUI 只负责文件选择与系统分享；快照写入前完成完整校验，避免部分导入。
+9. 项目文件树和文本预览统一走 sidecar `workspace.list/read`，经过真实路径解析、workspace policy、隐藏目录过滤和大小上限校验；附件路径随聊天请求传给 Agent。
+10. 模型配置支持多个非密钥 profile，客户端备份包含 profile 列表，sidecar 的部分 runtime.configure 不会清空已有 relay/model 配置。
 
 ## 当前可运行验收（2026-07-18）
 
 - `pnpm sidecar:test`：stdio、memory、relay、channels、computer-use、e2e、路由测试通过；Windows relay 测试结束时的 `UV_HANDLE_CLOSING` 是 Node teardown 已知噪声，测试 runner 已按 4 个断言通过处理。
 - `pnpm sidecar:typecheck`：sidecar 与 workspace packages 的 TypeScript strict 检查通过；workspace alias、MCP、recovery、proactive 和 channel 类型已对齐。
+- `pnpm sidecar:test`：新增 workspace list/read policy 测试；C# pairing envelope 已与 `@pattern/relay/pairing` 双向互操作验证。
 - `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
 - `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
 - `pnpm maui:mac:debug`：`net10.0-maccatalyst` Debug 编译通过；Catalyst 真机签名、通知权限和菜单交互仍需 macOS 主机验收。

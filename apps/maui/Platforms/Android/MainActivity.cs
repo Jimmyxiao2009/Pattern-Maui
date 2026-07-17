@@ -17,11 +17,11 @@ public class MainActivity : MauiAppCompatActivity
     {
         base.OnCreate(savedInstanceState);
         SavePairingIntent(Intent);
+        if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+            RequestNotificationPermission();
         var intent = new Intent(this, typeof(RelaySyncService));
         if (Build.VERSION.SdkInt >= BuildVersionCodes.O) StartForegroundServiceO(intent);
         else StartService(intent);
-        if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
-            RequestNotificationPermission();
     }
 
     protected override void OnNewIntent(Intent? intent)

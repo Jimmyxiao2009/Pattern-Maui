@@ -46,7 +46,14 @@ public sealed class RelaySyncService : Service
         await relay.InitializeAsync();
         while (!cancellationToken.IsCancellationRequested)
         {
-            try { await relay.SyncAsync(cancellationToken); }
+            try
+            {
+                // Reload preferences so pairing/manual changes made in the UI are
+                // picked up by the long-lived foreground worker.
+                await relay.InitializeAsync();
+                var incoming = await relay.SyncAsync(cancellationToken);
+                if (incoming.Count > 0) NotifyIncoming(incoming.Count);
+            }
             catch (System.OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch { /* status is visible in the app's relay page */ }
             try { await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken); }
@@ -59,5 +66,26 @@ public sealed class RelaySyncService : Service
         if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
         var manager = (NotificationManager?)GetSystemService(NotificationService);
         manager?.CreateNotificationChannel(new NotificationChannel("pattern-relay", "Pattern 中继", NotificationImportance.Low));
+        manager?.CreateNotificationChannel(new NotificationChannel("pattern-messages", "Pattern 消息", NotificationImportance.Default));
+    }
+
+    private void NotifyIncoming(int count)
+    {
+        var intent = new Intent(this, typeof(MainActivity));
+        intent.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop);
+        var flags = PendingIntentFlags.UpdateCurrent;
+        if (Build.VERSION.SdkInt >= BuildVersionCodes.M) flags |= PendingIntentFlags.Immutable;
+        var pending = PendingIntent.GetActivity(this, 1002, intent, flags);
+        var builder = Build.VERSION.SdkInt >= BuildVersionCodes.O
+            ? new Notification.Builder(this, "pattern-messages")
+            : new Notification.Builder(this);
+        var notification = builder
+            .SetContentTitle("Pattern 收到新消息")
+            .SetContentText($"有 {count} 条中继消息待查看")
+            .SetSmallIcon(Android.Resource.Drawable.IcDialogInfo)
+            .SetContentIntent(pending)
+            .SetAutoCancel(true)
+            .Build();
+        ((NotificationManager?)GetSystemService(NotificationService))?.Notify(1002, notification);
     }
 }

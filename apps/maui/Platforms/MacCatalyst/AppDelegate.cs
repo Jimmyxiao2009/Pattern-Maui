@@ -2,6 +2,7 @@ using Foundation;
 using ObjCRuntime;
 using Pattern.Maui.Services;
 using UIKit;
+using UserNotifications;
 
 namespace Pattern.Maui;
 
@@ -9,6 +10,12 @@ namespace Pattern.Maui;
 public class AppDelegate : MauiUIApplicationDelegate
 {
     protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
+
+    public override bool FinishedLaunching(UIApplication application, NSDictionary? launchOptions)
+    {
+        _ = UNUserNotificationCenter.Current.RequestAuthorizationAsync(UNAuthorizationOptions.Alert | UNAuthorizationOptions.Sound | UNAuthorizationOptions.Badge);
+        return base.FinishedLaunching(application, launchOptions);
+    }
 
     public override void BuildMenu(IUIMenuBuilder builder)
     {

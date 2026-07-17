@@ -388,6 +388,15 @@ export interface DataSnapshot {
   excluded: string[];
 }
 
+export interface WorkspaceFileNode {
+  name: string;
+  path: string;
+  kind: 'file' | 'directory';
+  size?: number;
+  modifiedAt?: number;
+  children?: WorkspaceFileNode[];
+}
+
 export type ClientMessage =
   | {
       type: 'chat.send';
@@ -446,6 +455,7 @@ export type ClientMessage =
   | { type: 'skill.list'; id: string }
   | { type: 'skill.install'; id: string; skill: SkillDefinition }
   | { type: 'skill.remove'; id: string; skillId: string }
+  | { type: 'skill.run'; id: string; skillId: string; goal?: string; workspace?: string }
   | { type: 'workflow.list'; id: string }
   | { type: 'workflow.run'; id: string; workflowId: string; input: string; workspace?: string; isolatedWorktree?: boolean; agentCount?: number }
   | { type: 'mcp.list'; id: string }
@@ -455,6 +465,8 @@ export type ClientMessage =
   | { type: 'workspace.worktree.create'; id: string; root: string; name?: string }
   | { type: 'workspace.diff'; id: string; root: string }
   | { type: 'projects.sync'; id: string; projects: Array<{id: string; name: string; path: string}> }
+  | { type: 'workspace.list'; id: string; root: string; depth?: number }
+  | { type: 'workspace.read'; id: string; path: string; maxBytes?: number }
   | { type: 'filewatch.getConfig'; id: string }
   | { type: 'filewatch.setConfig'; id: string; config: FileWatchConfig }
   | { type: 'filewatch.list'; id: string; limit?: number }
@@ -521,6 +533,8 @@ export type ServerMessage =
   | { type: 'workspace.worktree.created'; id: string; path: string; branch: string }
   | { type: 'workspace.diff.result'; id: string; root: string; status: string; diff: string }
   | { type: 'projects.sync.result'; id: string; ok: boolean; count: number }
+  | { type: 'workspace.list.result'; id: string; root: string; nodes: WorkspaceFileNode[] }
+  | { type: 'workspace.read.result'; id: string; path: string; content: string; truncated: boolean }
   | { type: 'filewatch.config'; id: string; config: FileWatchConfig }
   | { type: 'filewatch.list.result'; id: string; items: FileWatchEvent[] }
   | { type: 'filewatch.event'; item: FileWatchEvent }

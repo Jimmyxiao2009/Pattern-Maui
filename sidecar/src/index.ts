@@ -4,8 +4,8 @@ import {createInterface} from 'node:readline';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {homedir} from 'node:os';
-import {dirname, join} from 'node:path';
-import {existsSync, mkdirSync, readFileSync, writeFileSync, watch, statSync, readdirSync, unlinkSync, type FSWatcher} from 'node:fs';
+import {dirname, join, resolve} from 'node:path';
+import {existsSync, mkdirSync, readFileSync, writeFileSync, watch, statSync, readdirSync, realpathSync, unlinkSync, type FSWatcher} from 'node:fs';
 import {WebSocketServer, WebSocket} from 'ws';
 import {MemoryEngine, categoryLabel, ensureDataDir, localEmbed, type MemoryRecord} from '@pattern/memory';
 import {ProactiveEngine} from '@pattern/proactive';
@@ -36,6 +36,7 @@ import type {
   SessionPlanItem,
   AuditEntry,
   DataSnapshot,
+  WorkspaceFileNode,
 } from '@pattern/protocol';
 import {
   clearSessionPlan,
@@ -143,6 +144,53 @@ function importDataSnapshot(snapshot: DataSnapshot) {
   cronTriggers = loadCronTriggers();
   securityPolicy = loadSecurityPolicy();
   return {files: files.length, memories: snapshot.memories.length, restartRequired: true};
+}
+
+function listWorkspaceDirectory(root: string, depth = 1): WorkspaceFileNode[] {
+  const resolved = resolveWorkspacePath(root);
+  assertWorkspaceAllowed(resolved, 'workspace.list');
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) throw new Error('项目目录不存在或不可读');
+  const maxDepth = Math.min(3, Math.max(0, Number(depth) || 1));
+  const visit = (directory: string, remaining: number): WorkspaceFileNode[] => {
+    const entries = readdirSync(directory, {withFileTypes: true})
+      .filter((entry) => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'bin' && entry.name !== 'obj')
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: 'base'}));
+    return entries.slice(0, 500).map((entry) => {
+      const path = join(directory, entry.name);
+      try {
+        const info = statSync(path);
+        const node: WorkspaceFileNode = {
+          name: entry.name,
+          path,
+          kind: entry.isDirectory() ? 'directory' : 'file',
+          size: entry.isFile() ? info.size : undefined,
+          modifiedAt: Math.floor(info.mtimeMs / 1000),
+        };
+        if (entry.isDirectory() && remaining > 0) node.children = visit(path, remaining - 1);
+        return node;
+      } catch {
+        return {name: entry.name, path, kind: entry.isDirectory() ? 'directory' : 'file'} as WorkspaceFileNode;
+      }
+    });
+  };
+  return visit(resolved, maxDepth);
+}
+
+function readWorkspaceText(path: string, maxBytes = 120000) {
+  const resolved = resolveWorkspacePath(path);
+  assertWorkspaceAllowed(resolved, 'workspace.read');
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) throw new Error('文件不存在或不可读');
+  const limit = Math.min(512000, Math.max(1024, Number(maxBytes) || 120000));
+  const bytes = readFileSync(resolved);
+  if (bytes.includes(0)) throw new Error('二进制文件不提供文本预览');
+  const truncated = bytes.byteLength > limit;
+  return {path: resolved, content: bytes.subarray(0, limit).toString('utf8'), truncated};
+}
+
+function resolveWorkspacePath(path: string) {
+  if (!path || path.includes('\0')) throw new Error('路径无效');
+  const lexical = resolve(String(path));
+  try { return realpathSync(lexical); } catch { return lexical; }
 }
 function skillsFile() {
   return join(dataDir, 'skills.json');
@@ -4114,6 +4162,14 @@ case 'journal.list': {
         send(socket, {type: 'skill.updated', id: message.id, skills: allSkills()});
         break;
       }
+      case 'skill.run': {
+        const skill = allSkills().find((item) => item.id === message.skillId || item.name === message.skillId || item.name.toLowerCase() === message.skillId.toLowerCase());
+        if (!skill) { send(socket, {type:'error', id:message.id, message:'未找到指定 skill'}); break; }
+        const goal = String(message.goal || skill.description || skill.name).trim().slice(0, 4000);
+        const task = await createTaskFromText(`${skill.name} · ${taskTitleFromText(goal)}`, `[Skill: ${skill.name}]\n${skill.prompt}\n\n用户目标：${goal}\n权限：${skill.permissions.join(', ')}`, undefined, undefined, undefined, {workspace: message.workspace});
+        send(socket, {type:'task.list.result', id:message.id, tasks, createdTask:task});
+        break;
+      }
       case 'workflow.list': {
         send(socket, {type:'workflow.list.result', id:message.id, workflows:allWorkflows()});
         break;
@@ -4285,20 +4341,36 @@ case 'journal.list': {
         break;
       }
       case 'workspace.worktree.create': {
-        assertWorkspaceAllowed(message.root, 'workspace.worktree');
-        try { const result = await createGitWorktree(message.root, message.name); send(socket, {type:'workspace.worktree.created', id:message.id, ...result}); }
+        const root = resolveWorkspacePath(message.root);
+        assertWorkspaceAllowed(root, 'workspace.worktree');
+        try { const result = await createGitWorktree(root, message.name); send(socket, {type:'workspace.worktree.created', id:message.id, ...result}); }
         catch (error) { send(socket, {type:'error', id:message.id, message:error instanceof Error ? error.message : String(error)}); }
         break;
       }
-      case 'workspace.diff': {
-        assertWorkspaceAllowed(message.root, 'workspace.diff');
+      case 'workspace.list': {
         try {
-          if (!existsSync(message.root) || !statSync(message.root).isDirectory()) throw new Error('工作区目录不存在');
+          const root = resolveWorkspacePath(message.root);
+          send(socket, {type:'workspace.list.result', id:message.id, root, nodes:listWorkspaceDirectory(root, message.depth)});
+        } catch (error) { send(socket, {type:'error', id:message.id, message:error instanceof Error ? error.message : String(error)}); }
+        break;
+      }
+      case 'workspace.read': {
+        try {
+          const result = readWorkspaceText(message.path, message.maxBytes);
+          send(socket, {type:'workspace.read.result', id:message.id, ...result});
+        } catch (error) { send(socket, {type:'error', id:message.id, message:error instanceof Error ? error.message : String(error)}); }
+        break;
+      }
+      case 'workspace.diff': {
+        const root = resolveWorkspacePath(message.root);
+        assertWorkspaceAllowed(root, 'workspace.diff');
+        try {
+          if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error('工作区目录不存在');
           const [status, diff] = await Promise.all([
-            execFileAsync('git', ['-C', message.root, 'status', '--short'], {windowsHide:true}),
-            execFileAsync('git', ['-C', message.root, 'diff', '--no-ext-diff'], {windowsHide:true}),
+            execFileAsync('git', ['-C', root, 'status', '--short'], {windowsHide:true}),
+            execFileAsync('git', ['-C', root, 'diff', '--no-ext-diff'], {windowsHide:true}),
           ]);
-          send(socket, {type:'workspace.diff.result', id:message.id, root:message.root, status:status.stdout.slice(0,12000), diff:diff.stdout.slice(0,12000)});
+          send(socket, {type:'workspace.diff.result', id:message.id, root, status:status.stdout.slice(0,12000), diff:diff.stdout.slice(0,12000)});
         } catch (error) { send(socket, {type:'error', id:message.id, message:error instanceof Error ? error.message : String(error)}); }
         break;
       }
@@ -4585,7 +4657,25 @@ case 'journal.list': {
   }
 }
 function applyConfig(next: RuntimeConfigure) {
-  config = next;
+  const previous = config;
+  if (previous) {
+    const incoming = next as RuntimeConfigure & Record<string, unknown>;
+    const has = (key: string) => Object.prototype.hasOwnProperty.call(incoming, key);
+    config = {
+      ...previous,
+      ...next,
+      webdav: has('webdav') ? next.webdav : previous.webdav,
+      telegram: has('telegram') ? next.telegram : previous.telegram,
+      email: has('email') ? next.email : previous.email,
+      plugins: has('plugins') ? next.plugins : previous.plugins,
+      proactive: has('proactive') ? next.proactive : previous.proactive,
+      modelConnections: has('modelConnections') ? next.modelConnections : previous.modelConnections,
+      executor: has('executor') ? next.executor : previous.executor,
+      utility: has('utility') ? next.utility : previous.utility,
+      agent: has('agent') ? next.agent : previous.agent,
+      embedding: has('embedding') ? next.embedding : previous.embedding,
+    };
+  } else config = next;
   healthStates.clear();
   if (next.proactive) {
     proactive.setConfig({
@@ -4597,12 +4687,13 @@ function applyConfig(next: RuntimeConfigure) {
   if (next.dataDir) {
     // dataDir fixed at boot for this process
   }
-  const relayConfig: RelayConfig | null = next.webdav?.url
-    ? {url: next.webdav.url, username: next.webdav.username || '', password: next.webdav.password || ''}
+  const activeConfig = config as RuntimeConfigure;
+  const relayConfig: RelayConfig | null = activeConfig.webdav?.url
+    ? {url: activeConfig.webdav.url, username: activeConfig.webdav.username || '', password: activeConfig.webdav.password || ''}
     : null;
   relay.updateConfig(relayConfig);
-  if (next.deviceId) relay.deviceId = next.deviceId;
-  if (next.channelKey) relay.channelKey = next.channelKey;
+  if (activeConfig.deviceId) relay.deviceId = activeConfig.deviceId;
+  if (activeConfig.channelKey) relay.channelKey = activeConfig.channelKey;
   restartFileWatchers();
   void telegramPoll();
   void configurePlugins();

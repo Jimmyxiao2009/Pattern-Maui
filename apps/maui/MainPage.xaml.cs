@@ -22,19 +22,22 @@ public partial class MainPage : ContentPage
     private readonly SingleInstanceService _instance;
     private readonly GlobalHotkeyService _hotkey;
     private readonly WindowsTrayService _tray;
+    private readonly AutostartService _autostart;
     private readonly List<ChatTurn> _history = [];
+    private readonly List<string> _attachedPaths = [];
     private readonly List<ConversationSession> _sessions = [];
     private readonly Dictionary<string, View> _views = [];
     private Label? _conversationLabel;
     private Entry? _messageEntry;
     private Button? _cancelButton;
+    private Button? _attachButton;
     private string? _activeChatId;
     private string _activeSessionId = "default";
     private string _conversation = "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。";
     private string _activeAssistantText = string.Empty;
     private bool _loaded;
 
-    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey, WindowsTrayService tray)
+    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey, WindowsTrayService tray, AutostartService autostart)
     {
         InitializeComponent();
         _runtime = runtime;
@@ -44,6 +47,7 @@ public partial class MainPage : ContentPage
         _instance = instance;
         _hotkey = hotkey;
         _tray = tray;
+        _autostart = autostart;
         LoadHistory();
         _hotkey.QuickChatRequested += () => MainThread.BeginInvokeOnMainThread(() =>
         {
@@ -206,6 +210,7 @@ public partial class MainPage : ContentPage
                 persona = profile.Persona,
                 personaName = "Pattern",
                 userName = profile.UserName,
+                modelConnections = ModelConnectionPayload(),
                 proactive = new { enabled = profile.ProactiveEnabled, paused = profile.ProactivePaused, bedtimeHour = profile.BedtimeHour },
                 webdav = relaySettings.IsConfigured ? new { url = relaySettings.Url, username = relaySettings.Username, password = relaySettings.Password } : null,
                 deviceId = relaySettings.DeviceId,
@@ -243,6 +248,22 @@ public partial class MainPage : ContentPage
         };
         _messageEntry = new Entry { Placeholder = "给 Pattern 发消息", ReturnType = ReturnType.Send };
         _messageEntry.Completed += async (_, _) => await SendAsync();
+        var attach = new Button { Text = "附加" };
+        _attachButton = attach;
+        attach.Clicked += async (_, _) =>
+        {
+            try
+            {
+                var file = await FilePicker.Default.PickAsync(new PickOptions { PickerTitle = "选择要附加给 Pattern 的文件" });
+                if (file is not null && !string.IsNullOrWhiteSpace(file.FullPath) && !_attachedPaths.Contains(file.FullPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    _attachedPaths.Add(file.FullPath);
+                    attach.Text = $"附加({_attachedPaths.Count})";
+                    StatusLabel.Text = $"已附加 {_attachedPaths.Count} 个路径";
+                }
+            }
+            catch (Exception error) { StatusLabel.Text = $"选择附件失败：{error.Message}"; }
+        };
         var send = new Button { Text = "发送", BackgroundColor = (Color)Application.Current!.Resources["Accent"], TextColor = (Color)Application.Current!.Resources["PageBackground"] };
         send.Clicked += async (_, _) => await SendAsync();
         _cancelButton = new Button { Text = "停止", IsEnabled = false };
@@ -251,10 +272,11 @@ public partial class MainPage : ContentPage
             if (_activeChatId is null) return;
             await _runtime.CancelChatAsync(_activeChatId);
         };
-        var composer = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto) }, ColumnSpacing = 8 };
+        var composer = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto) }, ColumnSpacing = 8 };
         composer.Add(_messageEntry, 0, 0);
-        composer.Add(send, 1, 0);
-        composer.Add(_cancelButton, 2, 0);
+        composer.Add(attach, 1, 0);
+        composer.Add(send, 2, 0);
+        composer.Add(_cancelButton, 3, 0);
         Grid.SetRow(composer, 1);
         return new Grid
         {
@@ -305,10 +327,10 @@ public partial class MainPage : ContentPage
         {
             var next = new RuntimeProfile("openai-compatible", endpoint.Text ?? string.Empty, model.Text ?? string.Empty, persona, user.Text ?? "User", profile.ProactiveEnabled, profile.ProactivePaused, profile.BedtimeHour);
             _settings.SaveProfile(next);
-            await _settings.SaveApiKeyAsync(key.Text ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(key.Text)) await _settings.SaveApiKeyAsync(key.Text.Trim());
             try
             {
-                await _runtime.ConfigureAsync(new { provider = next.Provider, endpoint = next.Endpoint, model = next.Model, apiKey = key.Text ?? await _settings.LoadApiKeyAsync(), persona = next.Persona, personaName = "Pattern", userName = next.UserName, proactive = new { enabled = next.ProactiveEnabled, paused = next.ProactivePaused, bedtimeHour = next.BedtimeHour } });
+                await _runtime.ConfigureAsync(new { provider = next.Provider, endpoint = next.Endpoint, model = next.Model, apiKey = string.IsNullOrWhiteSpace(key.Text) ? await _settings.LoadApiKeyAsync() : key.Text.Trim(), persona = next.Persona, personaName = "Pattern", userName = next.UserName, modelConnections = ModelConnectionPayload(), proactive = new { enabled = next.ProactiveEnabled, paused = next.ProactivePaused, bedtimeHour = next.BedtimeHour } });
                 output.Text = "设置完成。可以开始对话；API Key 已交给系统安全存储。";
                 ShowView("chat");
             }
@@ -338,6 +360,10 @@ public partial class MainPage : ContentPage
         catch { return value.GetRawText(); }
     }
 
+    private object[] ModelConnectionPayload() => _settings.LoadModelProfiles()
+        .Select(item => (object)new { id = item.Id, name = item.Name, provider = item.Provider, endpoint = item.Endpoint, models = item.Models, enabled = true })
+        .ToArray();
+
     private async Task RequestToEditorAsync(object request, Editor output, string? successStatus = null)
     {
         try
@@ -352,6 +378,46 @@ public partial class MainPage : ContentPage
             output.Text = $"请求失败\n\n{error.Message}";
             StatusLabel.Text = "请求失败（可重连）";
         }
+    }
+
+    protected override async void OnAppearing()
+    {
+        base.OnAppearing();
+        if (!OperatingSystem.IsAndroid()) return;
+        try
+        {
+            await _relay.InitializeAsync();
+            AppendRelayMessages(_relay.DrainInbox());
+        }
+        catch (Exception error) { StatusLabel.Text = $"中继状态读取失败：{error.Message}"; }
+    }
+
+    private void AppendRelayMessages(IEnumerable<RelayEnvelope> messages)
+    {
+        var incoming = messages.Where(item => item.Type is "chat" or "proactive" or "task").ToArray();
+        if (incoming.Length == 0) return;
+        foreach (var item in incoming)
+        {
+            var body = item.Type == "task" ? FormatRelayTask(item.Body) : item.Body;
+            _conversation += $"\n\n中继消息：{body}";
+            _history.Add(new ChatTurn("assistant", body));
+        }
+        if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+        SaveHistory();
+        StatusLabel.Text = $"收到 {incoming.Length} 条中继消息";
+    }
+
+    private static string FormatRelayTask(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            var task = document.RootElement.TryGetProperty("task", out var nested) ? nested : document.RootElement;
+            var title = task.TryGetProperty("title", out var titleValue) ? titleValue.GetString() : "远程任务";
+            var status = task.TryGetProperty("status", out var statusValue) ? statusValue.GetString() : "updated";
+            return $"远程任务：{title}\n状态：{status}";
+        }
+        catch { return $"远程任务：{body}"; }
     }
 
     private View CreateDataView(string title, object request)
@@ -376,8 +442,54 @@ public partial class MainPage : ContentPage
     private View CreateProjectView()
     {
         var output = OutputEditor();
+        var preview = OutputEditor();
+        preview.Placeholder = "选择文件后显示文本预览（最多 120 KB）";
         var path = new Entry { Placeholder = "工作区绝对路径", WidthRequest = 360 };
         var name = new Entry { Placeholder = "项目名", WidthRequest = 160 };
+        var tree = new CollectionView
+        {
+            SelectionMode = SelectionMode.Single,
+            EmptyView = new Label { Text = "还没有文件树，请先输入目录并点击“列出文件”。", Padding = 12 },
+            ItemTemplate = new DataTemplate(() =>
+            {
+                var label = new Label { FontSize = 13, Padding = new Thickness(8, 6) };
+                label.SetBinding(Label.TextProperty, nameof(WorkspaceRow.Display));
+                return new Border
+                {
+                    StrokeThickness = 0,
+                    BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"],
+                    Content = label,
+                    Margin = new Thickness(0, 1),
+                };
+            }),
+        };
+        var list = new Button { Text = "列出文件" };
+        list.Clicked += async (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(path.Text)) return;
+            try
+            {
+                var response = await _runtime.RequestAsync(new { type = "workspace.list", root = path.Text.Trim(), depth = 2 });
+                var rows = response.TryGetProperty("nodes", out var nodes) ? FlattenWorkspaceNodes(nodes).ToArray() : Array.Empty<WorkspaceRow>();
+                tree.ItemsSource = rows;
+                output.Text = $"已读取 {rows.Length} 个节点\n\n目录与文件均经过 sidecar workspace policy 校验。";
+                StatusLabel.Text = "项目文件树已加载";
+            }
+            catch (Exception error) { output.Text = $"读取项目目录失败：{error.Message}"; }
+        };
+        tree.SelectionChanged += async (_, args) =>
+        {
+            var row = args.CurrentSelection.FirstOrDefault() as WorkspaceRow;
+            if (row is null || row.Kind != "file") return;
+            try
+            {
+                var response = await _runtime.RequestAsync(new { type = "workspace.read", path = row.Path, maxBytes = 120000 });
+                preview.Text = response.TryGetProperty("content", out var content) ? content.GetString() ?? string.Empty : Format(response);
+                if (response.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean()) preview.Text += "\n\n[内容已截断]";
+            }
+            catch (Exception error) { preview.Text = $"文件预览失败：{error.Message}"; }
+            finally { tree.SelectedItem = null; }
+        };
         var sync = new Button { Text = "同步项目" };
         sync.Clicked += async (_, _) =>
         {
@@ -388,7 +500,30 @@ public partial class MainPage : ContentPage
         diff.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "workspace.diff", root = path.Text }, output);
         var worktree = new Button { Text = "创建 Worktree" };
         worktree.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "workspace.worktree.create", root = path.Text, name = name.Text }, output);
-        return FeatureRoot("项目工作区", new HorizontalStackLayout { Spacing = 8, Children = { path, name, sync, diff, worktree } }, output);
+        var actions = new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { path, name, list, sync, diff, worktree } } };
+        var content = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition { Height = new GridLength(280) }, new RowDefinition { Height = GridLength.Star } }, RowSpacing = 8 };
+        content.Add(tree, 0, 0);
+        content.Add(preview, 0, 1);
+        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star) }, RowSpacing = 12 };
+        root.Add(new Label { Text = "项目工作区", FontSize = 24, FontAttributes = FontAttributes.Bold }, 0, 0);
+        root.Add(actions, 0, 1);
+        root.Add(content, 0, 2);
+        return root;
+    }
+
+    private static IEnumerable<WorkspaceRow> FlattenWorkspaceNodes(JsonElement nodes, int level = 0)
+    {
+        if (nodes.ValueKind != JsonValueKind.Array) yield break;
+        foreach (var node in nodes.EnumerateArray())
+        {
+            var name = node.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "" : "";
+            var path = node.TryGetProperty("path", out var pathValue) ? pathValue.GetString() ?? "" : "";
+            var kind = node.TryGetProperty("kind", out var kindValue) ? kindValue.GetString() ?? "file" : "file";
+            var size = node.TryGetProperty("size", out var sizeValue) && sizeValue.ValueKind == JsonValueKind.Number ? $" · {sizeValue.GetInt64():n0} B" : "";
+            yield return new WorkspaceRow(kind, path, $"{new string(' ', Math.Min(12, level) * 2)}{(kind == "directory" ? "▸ " : "  ")}{name}{size}");
+            if (node.TryGetProperty("children", out var children))
+                foreach (var child in FlattenWorkspaceNodes(children, level + 1)) yield return child;
+        }
     }
 
     private View CreateConversationsView()
@@ -525,12 +660,27 @@ public partial class MainPage : ContentPage
         create.Clicked += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(title.Text)) return;
+            if (OperatingSystem.IsAndroid())
+            {
+                await _relay.PublishTaskAsync(title.Text.Trim(), detail.Text ?? string.Empty);
+                output.Text = _relay.Status.Online ? "远程任务已发送到桌面 sidecar。" : "桌面当前离线，任务已进入 relay outbox。";
+                title.Text = string.Empty;
+                detail.Text = string.Empty;
+                return;
+            }
             await RequestToEditorAsync(new { type = "task.create", title = title.Text, detail = detail.Text ?? string.Empty }, output, "任务已创建");
             title.Text = string.Empty;
             detail.Text = string.Empty;
         };
         var list = new Button { Text = "刷新任务" };
-        list.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "task.list" }, output);
+        list.Clicked += async (_, _) =>
+        {
+            if (!OperatingSystem.IsAndroid()) { await RequestToEditorAsync(new { type = "task.list" }, output); return; }
+            await _relay.InitializeAsync();
+            var incoming = _relay.DrainInbox().Where(item => item.Type == "task").ToArray();
+            output.Text = JsonSerializer.Serialize(new { status = _relay.Status, incoming = incoming.Select(item => FormatRelayTask(item.Body)) }, JsonOptions);
+            AppendRelayMessages(incoming);
+        };
         var run = new Button { Text = "运行（按 ID）" };
         run.Clicked += async (_, _) => await ControlByPromptAsync("任务 ID", id => new { type = "task.control", taskId = id, action = "run" }, output);
         var cancel = new Button { Text = "终止（按 ID）" };
@@ -557,6 +707,19 @@ public partial class MainPage : ContentPage
         refresh.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.list", limit = 100 }, output);
         var chains = new Button { Text = "主动链" };
         chains.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.chain.list", limit = 100 }, output);
+        var mark = new Button { Text = "处理收件箱（按 ID）" };
+        mark.Clicked += async (_, _) =>
+        {
+            var id = await DisplayPromptAsync("主动消息 ID", "输入收件箱项目 ID");
+            if (string.IsNullOrWhiteSpace(id)) return;
+            var state = await DisplayActionSheetAsync("标记主动消息", "取消", null, "已读", "忽略", "已回复");
+            var value = state switch { "已读" => "read", "忽略" => "dismissed", "已回复" => "replied", _ => null };
+            if (value is not null) await RequestToEditorAsync(new { type = "proactive.inbox.mark", itemId = id.Trim(), state = value }, output);
+        };
+        var runChain = new Button { Text = "立即运行主动链" };
+        runChain.Clicked += async (_, _) => await ControlByPromptAsync("主动链 ID", id => new { type = "proactive.chain.runNow", chainId = id }, output);
+        var cancelChain = new Button { Text = "取消主动链" };
+        cancelChain.Clicked += async (_, _) => await ControlByPromptAsync("主动链 ID", id => new { type = "proactive.chain.cancel", chainId = id }, output);
         var trigger = new Button { Text = "手动触发" };
         trigger.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.trigger", kind = "manual", reason = "MAUI 用户手动触发" }, output);
         var pause = new Button { Text = "暂停主动能力" };
@@ -571,7 +734,7 @@ public partial class MainPage : ContentPage
             var value = await DisplayPromptAsync("睡眠小时", "输入 0-23");
             if (int.TryParse(value, out var hour)) await RequestToEditorAsync(new { type = "proactive.setConfig", bedtimeHour = Math.Clamp(hour, 0, 23) }, output);
         };
-        return FeatureRoot("主动能力", new HorizontalStackLayout { Spacing = 8, Children = { refresh, chains, trigger, pause, resume, config, bedtime } }, output);
+        return FeatureRoot("主动能力", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { refresh, chains, mark, runChain, cancelChain, trigger, pause, resume, config, bedtime } } }, output);
     }
 
     private View CreateSkillsView()
@@ -586,7 +749,14 @@ public partial class MainPage : ContentPage
         install.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "skill.install", skill = new { id = id.Text, name = name.Text, kind = "coding", description = name.Text, permissions = new[] { "workspace.read" }, prompt = prompt.Text, builtin = false } }, output);
         var remove = new Button { Text = "删除（按 ID）" };
         remove.Clicked += async (_, _) => await ControlByPromptAsync("技能 ID", value => new { type = "skill.remove", skillId = value }, output);
-        return FeatureRoot("技能", new HorizontalStackLayout { Spacing = 8, Children = { list, id, name, prompt, install, remove } }, output);
+        var run = new Button { Text = "运行技能" };
+        run.Clicked += async (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(id.Text)) return;
+            var goal = await DisplayPromptAsync("技能目标", "输入这次技能要完成的目标") ?? string.Empty;
+            await RequestToEditorAsync(new { type = "skill.run", skillId = id.Text.Trim(), goal }, output);
+        };
+        return FeatureRoot("技能", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { list, id, name, prompt, install, run, remove } } }, output);
     }
 
     private View CreateWorkflowsView()
@@ -635,13 +805,9 @@ public partial class MainPage : ContentPage
         sync.Clicked += async (_, _) =>
         {
             if (!OperatingSystem.IsAndroid()) { await RequestToEditorAsync(new { type = "relay.syncNow" }, output); return; }
-            var incoming = await _relay.SyncAsync();
+            var incoming = await _relay.SyncAsync(persistIncoming: false);
             output.Text = JsonSerializer.Serialize(new { status = _relay.Status, incoming }, JsonOptions);
-            foreach (var item in incoming.Where(item => item.Type == "chat"))
-            {
-                _conversation += $"\n\n中继消息：{item.Body}";
-                if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
-            }
+            AppendRelayMessages(incoming);
         };
         var pair = new Button { Text = "输入配对码" };
         pair.Clicked += async (_, _) =>
@@ -650,13 +816,69 @@ public partial class MainPage : ContentPage
             if (string.IsNullOrWhiteSpace(raw)) return;
             try
             {
-                var paired = RelayService.ParsePairingCode(raw);
-                await _relay.SaveSettingsAsync(paired);
+                var paired = await _relay.ApplyPairingCodeAsync(raw);
                 await ApplyRelayConfigurationAsync();
                 output.Text = "配对成功：" + JsonSerializer.Serialize(_relay.Status, JsonOptions);
                 StatusLabel.Text = "移动端中继已配对";
             }
             catch (Exception error) { output.Text = $"配对失败：{error.Message}"; }
+        };
+        var secureRequest = new Button { Text = "生成安全配对请求" };
+        secureRequest.Clicked += async (_, _) =>
+        {
+            try
+            {
+                var code = await _relay.CreateSecurePairingRequestAsync();
+                await Clipboard.Default.SetTextAsync(code);
+                output.Text = $"已生成 X25519 安全配对请求并复制到剪贴板：\n{code}\n\n请把请求码交给桌面端生成加密响应。私钥只保存在本机安全存储。";
+            }
+            catch (Exception error) { output.Text = $"生成安全配对请求失败：{error.Message}"; }
+        };
+        var secureResponse = new Button { Text = "生成加密配对响应" };
+        secureResponse.Clicked += async (_, _) =>
+        {
+            var request = await DisplayPromptAsync("安全配对", "粘贴手机生成的 X25519 请求码");
+            if (string.IsNullOrWhiteSpace(request)) return;
+            try
+            {
+                var code = _relay.CreateSecurePairingResponse(request);
+                await Clipboard.Default.SetTextAsync(code);
+                output.Text = $"已生成 X25519 + XChaCha20-Poly1305 加密响应并复制到剪贴板：\n{code}\n\n请把响应码交回手机端完成配对。";
+            }
+            catch (Exception error) { output.Text = $"生成加密响应失败：{error.Message}"; }
+        };
+        var telegram = new Button { Text = "配置 Telegram" };
+        telegram.Clicked += async (_, _) =>
+        {
+            if (OperatingSystem.IsAndroid()) { output.Text = "Telegram 由配对的桌面 sidecar 运行，请在桌面端配置。"; return; }
+            var token = await DisplayPromptAsync("Telegram Bot Token", "输入 bot token（留空停用）") ?? string.Empty;
+            var chatId = string.IsNullOrWhiteSpace(token) ? string.Empty : await DisplayPromptAsync("Telegram Chat ID", "输入 chat id") ?? string.Empty;
+            try
+            {
+                await _runtime.ConfigureAsync(new { telegram = new { enabled = !string.IsNullOrWhiteSpace(token) && !string.IsNullOrWhiteSpace(chatId), token, chatId } });
+                output.Text = string.IsNullOrWhiteSpace(token) ? "Telegram 已停用。" : "Telegram 配置已发送；token 不会写入普通日志。";
+            }
+            catch (Exception error) { output.Text = $"Telegram 配置失败：{error.Message}"; }
+        };
+        var email = new Button { Text = "配置邮件" };
+        email.Clicked += async (_, _) =>
+        {
+            if (OperatingSystem.IsAndroid()) { output.Text = "邮件通道由配对的桌面 sidecar 运行，请在桌面端配置。"; return; }
+            var host = await DisplayPromptAsync("SMTP Host", "输入 SMTP 主机（留空停用）") ?? string.Empty;
+            var username = string.IsNullOrWhiteSpace(host) ? string.Empty : await DisplayPromptAsync("SMTP 用户名", "输入用户名") ?? string.Empty;
+            var password = string.IsNullOrWhiteSpace(host) ? string.Empty : await DisplayPromptAsync("SMTP 密码", "输入密码") ?? string.Empty;
+            var recipient = string.IsNullOrWhiteSpace(host) ? string.Empty : await DisplayPromptAsync("收件人", "输入收件邮箱") ?? string.Empty;
+            var portText = string.IsNullOrWhiteSpace(host) ? "587" : await DisplayPromptAsync("SMTP 端口", "默认 587") ?? "587";
+            var imapHost = string.IsNullOrWhiteSpace(host) ? string.Empty : await DisplayPromptAsync("IMAP Host（可选）", "留空则不启用收件轮询") ?? string.Empty;
+            var imapPortText = string.IsNullOrWhiteSpace(imapHost) ? "993" : await DisplayPromptAsync("IMAP 端口", "默认 993") ?? "993";
+            _ = int.TryParse(portText, out var port);
+            _ = int.TryParse(imapPortText, out var imapPort);
+            try
+            {
+                await _runtime.ConfigureAsync(new { email = new { enabled = !string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(recipient), host, port = port is > 0 and < 65536 ? port : 587, secure = true, username, recipient, password, imapEnabled = !string.IsNullOrWhiteSpace(imapHost), imapHost, imapPort = imapPort is > 0 and < 65536 ? imapPort : 993, imapSecure = true } });
+                output.Text = string.IsNullOrWhiteSpace(host) ? "邮件通道已停用。" : "SMTP 配置已发送；密码不写入普通日志。";
+            }
+            catch (Exception error) { output.Text = $"邮件配置失败：{error.Message}"; }
         };
         var manual = new Button { Text = "手动配置" };
         manual.Clicked += async (_, _) =>
@@ -676,19 +898,86 @@ public partial class MainPage : ContentPage
         };
         var settings = new Button { Text = "打开通道设置" };
         settings.Clicked += (_, _) => ShowView("settings");
-        return FeatureRoot("通道与设备中继", new HorizontalStackLayout { Spacing = 8, Children = { status, sync, pair, manual, settings } }, output);
+        return FeatureRoot("通道与设备中继", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { status, sync, pair, secureRequest, secureResponse, telegram, email, manual, settings } } }, output);
     }
 
     private View CreateModelsView()
     {
         var output = OutputEditor();
+        var profiles = _settings.LoadModelProfiles();
+        var profilePicker = new Picker { Title = "模型配置", WidthRequest = 220, ItemsSource = profiles.Select(item => item.Name).ToList() };
+        var activeId = _settings.LoadActiveModelProfileId();
+        profilePicker.SelectedIndex = Math.Max(0, profiles.FindIndex(item => item.Id == activeId));
+        var profileName = new Entry { Placeholder = "配置名称", WidthRequest = 160 };
+        var provider = new Entry { Placeholder = "Provider", WidthRequest = 150 };
+        var endpoint = new Entry { Placeholder = "模型 Endpoint", WidthRequest = 280 };
+        var model = new Entry { Placeholder = "当前模型", WidthRequest = 180 };
+        var models = new Entry { Placeholder = "模型目录（逗号分隔）", WidthRequest = 260 };
+        void LoadSelectedProfile()
+        {
+            var selected = profilePicker.SelectedIndex >= 0 && profilePicker.SelectedIndex < profiles.Count ? profiles[profilePicker.SelectedIndex] : null;
+            if (selected is null) return;
+            profileName.Text = selected.Name;
+            provider.Text = selected.Provider;
+            endpoint.Text = selected.Endpoint;
+            model.Text = selected.Model;
+            models.Text = string.Join(",", selected.Models);
+        }
+        profilePicker.SelectedIndexChanged += (_, _) => LoadSelectedProfile();
+        LoadSelectedProfile();
+        var add = new Button { Text = "新增配置" };
+        add.Clicked += (_, _) =>
+        {
+            profiles.Add(new ModelProfile(Guid.NewGuid().ToString("N"), "新模型配置", "openai-compatible", "https://api.openai.com/v1", "gpt-4o-mini", ["gpt-4o-mini"]));
+            profilePicker.ItemsSource = profiles.Select(item => item.Name).ToList();
+            profilePicker.SelectedIndex = profiles.Count - 1;
+        };
+        var save = new Button { Text = "保存并切换" };
+        save.Clicked += async (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(endpoint.Text) || string.IsNullOrWhiteSpace(model.Text)) { output.Text = "Endpoint 和模型不能为空。"; return; }
+            var index = profilePicker.SelectedIndex < 0 ? profiles.Count : profilePicker.SelectedIndex;
+            var current = index < profiles.Count ? profiles[index] : new ModelProfile(Guid.NewGuid().ToString("N"), "模型配置", "openai-compatible", "", "", []);
+            var next = current with
+            {
+                Name = string.IsNullOrWhiteSpace(profileName.Text) ? current.Name : profileName.Text.Trim(),
+                Provider = string.IsNullOrWhiteSpace(provider.Text) ? "openai-compatible" : provider.Text.Trim(),
+                Endpoint = endpoint.Text.Trim(),
+                Model = model.Text.Trim(),
+                Models = models.Text?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).Take(100).ToList() ?? [model.Text.Trim()],
+            };
+            if (index < profiles.Count) profiles[index] = next; else profiles.Add(next);
+            _settings.SaveModelProfiles(profiles);
+            _settings.SaveActiveModelProfileId(next.Id);
+            profilePicker.ItemsSource = profiles.Select(item => item.Name).ToList();
+            profilePicker.SelectedIndex = profiles.FindIndex(item => item.Id == next.Id);
+            var currentRuntime = _settings.LoadProfile();
+            _settings.SaveProfile(currentRuntime with { Provider = next.Provider, Endpoint = next.Endpoint, Model = next.Model });
+            try
+            {
+                await _runtime.ConfigureAsync(new
+                {
+                    provider = next.Provider,
+                    endpoint = next.Endpoint,
+                    model = next.Model,
+                    apiKey = await _settings.LoadApiKeyAsync(),
+                    persona = currentRuntime.Persona,
+                    personaName = "Pattern",
+                    userName = currentRuntime.UserName,
+                    modelConnections = profiles.Select(item => new { id = item.Id, name = item.Name, provider = item.Provider, endpoint = item.Endpoint, models = item.Models, enabled = true }),
+                });
+                output.Text = $"已保存并切换到：{next.Name}\n共 {profiles.Count} 个模型配置。API Key 仍由系统安全存储管理。";
+            }
+            catch (Exception error) { output.Text = $"配置已保存，运行时应用失败：{error.Message}"; }
+        };
         var catalog = new Button { Text = "模型目录" };
         catalog.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "model.catalog.get" }, output);
         var metrics = new Button { Text = "使用指标" };
         metrics.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "model.metrics.get" }, output);
         var balance = new Button { Text = "余额/额度" };
         balance.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "model.balance.check" }, output);
-        return FeatureRoot("模型与用量", new HorizontalStackLayout { Spacing = 8, Children = { catalog, metrics, balance } }, output);
+        var actions = new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { profilePicker, profileName, provider, endpoint, model, models, add, save, catalog, metrics, balance } } };
+        return FeatureRoot("模型与用量", actions, output);
     }
 
     private View CreateFileWatchView()
@@ -737,10 +1026,10 @@ public partial class MainPage : ContentPage
         {
             var next = new RuntimeProfile(provider.Text ?? "openai-compatible", endpoint.Text ?? string.Empty, model.Text ?? string.Empty, profile.Persona, user.Text ?? "User", profile.ProactiveEnabled, profile.ProactivePaused, profile.BedtimeHour);
             _settings.SaveProfile(next);
-            await _settings.SaveApiKeyAsync(key.Text ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(key.Text)) await _settings.SaveApiKeyAsync(key.Text.Trim());
             try
             {
-                await _runtime.ConfigureAsync(new { provider = next.Provider, endpoint = next.Endpoint, model = next.Model, apiKey = key.Text ?? await _settings.LoadApiKeyAsync(), persona = next.Persona, personaName = "Pattern", userName = next.UserName, proactive = new { enabled = next.ProactiveEnabled, paused = next.ProactivePaused, bedtimeHour = next.BedtimeHour } });
+                await _runtime.ConfigureAsync(new { provider = next.Provider, endpoint = next.Endpoint, model = next.Model, apiKey = string.IsNullOrWhiteSpace(key.Text) ? await _settings.LoadApiKeyAsync() : key.Text.Trim(), persona = next.Persona, personaName = "Pattern", userName = next.UserName, modelConnections = ModelConnectionPayload(), proactive = new { enabled = next.ProactiveEnabled, paused = next.ProactivePaused, bedtimeHour = next.BedtimeHour } });
                 output.Text = "配置已保存并发送到 sidecar。API Key 不写入普通日志。";
             }
             catch (Exception error) { output.Text = $"配置失败：{error.Message}"; }
@@ -777,8 +1066,16 @@ public partial class MainPage : ContentPage
         exportData.Clicked += async (_, _) => await ExportDataSnapshotAsync(output);
         var importData = new Button { Text = "导入 Agent 数据" };
         importData.Clicked += async (_, _) => await ImportDataSnapshotAsync(output);
+        var autostart = new Button { Text = "开机启动" };
+        autostart.Clicked += (_, _) =>
+        {
+            var enabled = _autostart.SetEnabled(!_autostart.IsEnabled);
+            output.Text = _autostart.Supported
+                ? (enabled ? $"Windows 开机启动已{(_autostart.IsEnabled ? "启用" : "停用")}" : "开机启动设置失败")
+                : "当前平台不支持由 Pattern 管理开机启动。";
+        };
         var backupHint = new Label { Text = "备份包含配置与会话，不包含 API Key/Relay 密钥", FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center };
-        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, exportData, importData, backupHint } } }, output);
+        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, exportData, importData, autostart, backupHint } } }, output);
     }
 
     private async Task ExportBackupAsync(Editor output)
@@ -942,11 +1239,15 @@ public partial class MainPage : ContentPage
             {
                 await _relay.PublishChatAsync(text);
                 _history.Add(new ChatTurn("user", text));
+                _attachedPaths.Clear();
+                ResetAttachButton();
                 SaveHistory();
                 StatusLabel.Text = _relay.Status.Online ? "消息已发送到中继" : "已进入离线 outbox";
                 return;
             }
-            _activeChatId = await _runtime.SendChatAsync(text, priorHistory, _activeSessionId);
+            _activeChatId = await _runtime.SendChatAsync(text, priorHistory, _activeSessionId, _attachedPaths.ToArray());
+            _attachedPaths.Clear();
+            ResetAttachButton();
             _history.Add(new ChatTurn("user", text));
             if (_cancelButton is not null) _cancelButton.IsEnabled = true;
             StatusLabel.Text = "Pattern 正在思考…";
@@ -958,4 +1259,11 @@ public partial class MainPage : ContentPage
             if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
         }
     }
+
+    private void ResetAttachButton()
+    {
+        if (_attachButton is not null) _attachButton.Text = "附加";
+    }
+
+    private sealed record WorkspaceRow(string Kind, string Path, string Display);
 }

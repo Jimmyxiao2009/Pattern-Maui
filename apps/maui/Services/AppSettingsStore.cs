@@ -14,6 +14,15 @@ public sealed record RuntimeProfile(
     bool ProactivePaused,
     int BedtimeHour);
 
+/// <summary>Non-secret model connection profile. API keys remain in SecureStorage.</summary>
+public sealed record ModelProfile(
+    string Id,
+    string Name,
+    string Provider,
+    string Endpoint,
+    string Model,
+    List<string> Models);
+
 public sealed record ConversationSession(string Id, string Title, List<ChatTurn> Messages, bool Archived, DateTimeOffset UpdatedAt);
 
 public sealed record RelayBackupInfo(string Url, string Username, string DeviceId);
@@ -29,7 +38,8 @@ public sealed record AppSettingsBackup(
     RuntimeProfile Profile,
     List<ConversationSession> Sessions,
     string ConversationHistory,
-    RelayBackupInfo? Relay);
+    RelayBackupInfo? Relay,
+    List<ModelProfile>? ModelProfiles = null);
 
 /// <summary>
 /// Small persistence boundary for MAUI. Non-secret preferences use the platform
@@ -43,6 +53,8 @@ public sealed class AppSettingsStore
     private const string ApiKeyKey = "pattern.runtime.api-key";
     private const string ConversationKey = "pattern.conversation.history";
     private const string SessionsKey = "pattern.conversation.sessions";
+    private const string ModelProfilesKey = "pattern.model.profiles";
+    private const string ActiveModelProfileKey = "pattern.model.active";
 
     public RuntimeProfile LoadProfile()
     {
@@ -70,6 +82,29 @@ public sealed class AppSettingsStore
 
     public void SaveProfile(RuntimeProfile profile) =>
         Preferences.Default.Set(ProfileKey, JsonSerializer.Serialize(profile));
+
+    public List<ModelProfile> LoadModelProfiles()
+    {
+        var raw = Preferences.Default.Get(ModelProfilesKey, string.Empty);
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                var values = JsonSerializer.Deserialize<List<ModelProfile>>(raw) ?? [];
+                if (values.Count > 0) return values;
+            }
+            catch { Preferences.Default.Remove(ModelProfilesKey); }
+        }
+        var profile = LoadProfile();
+        return [new ModelProfile("default", "默认模型", profile.Provider, profile.Endpoint, profile.Model, [profile.Model])];
+    }
+
+    public void SaveModelProfiles(IEnumerable<ModelProfile> profiles) =>
+        Preferences.Default.Set(ModelProfilesKey, JsonSerializer.Serialize(profiles.Take(32).ToList()));
+
+    public string LoadActiveModelProfileId() => Preferences.Default.Get(ActiveModelProfileKey, "default");
+
+    public void SaveActiveModelProfileId(string id) => Preferences.Default.Set(ActiveModelProfileKey, id);
 
     public async Task<string> LoadApiKeyAsync()
     {
@@ -114,7 +149,8 @@ public sealed class AppSettingsStore
         LoadProfile(),
         LoadConversationSessions(),
         LoadConversationHistory(),
-        relay is null ? null : new RelayBackupInfo(relay.Url, relay.Username, relay.DeviceId));
+        relay is null ? null : new RelayBackupInfo(relay.Url, relay.Username, relay.DeviceId),
+        LoadModelProfiles());
 
     public void RestoreBackup(AppSettingsBackup backup)
     {
@@ -123,6 +159,7 @@ public sealed class AppSettingsStore
         SaveProfile(backup.Profile);
         SaveConversationSessions(backup.Sessions ?? []);
         SaveConversationHistory(backup.ConversationHistory ?? string.Empty);
+        if (backup.ModelProfiles is { Count: > 0 }) SaveModelProfiles(backup.ModelProfiles);
     }
 
     /// <summary>

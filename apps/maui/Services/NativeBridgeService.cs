@@ -3,6 +3,9 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+#if MACCATALYST
+using UserNotifications;
+#endif
 #if WINDOWS
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -272,6 +275,14 @@ public sealed class NativeBridgeService : IAsyncDisposable
         MessageBeep(0x00000040);
         var foreground = GetForegroundWindow();
         if (foreground != IntPtr.Zero) FlashWindow(foreground, true);
+        return new { ok = true, supported = true, delivered = true, title, body };
+#elif MACCATALYST
+        if (request is null) return Unsupported("notify");
+        var title = request.Value.TryGetProperty("title", out var titleValue) ? titleValue.GetString() : "Pattern";
+        var body = request.Value.TryGetProperty("body", out var bodyValue) ? bodyValue.GetString() : string.Empty;
+        var content = new UNMutableNotificationContent { Title = title ?? "Pattern", Body = body ?? string.Empty, Sound = UNNotificationSound.Default };
+        var notification = UNNotificationRequest.FromIdentifier($"pattern-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}", content, null);
+        UNUserNotificationCenter.Current.AddNotificationRequest(notification, _ => { });
         return new { ok = true, supported = true, delivered = true, title, body };
 #else
         return new { ok = true, delivered = false, supported = false };

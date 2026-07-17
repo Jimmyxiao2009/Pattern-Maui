@@ -35,6 +35,7 @@ public static class MauiProgram
             return hotkey;
         });
         builder.Services.AddSingleton<AppSettingsStore>();
+        builder.Services.AddSingleton<AutostartService>();
         builder.Services.AddSingleton<RelayService>();
         builder.Services.AddSingleton<MainPage>();
 #if DEBUG
