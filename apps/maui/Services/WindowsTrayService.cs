@@ -64,11 +64,21 @@ public sealed class WindowsTrayService : IDisposable
         _window = CreateWindowEx(0, ClassName, "Pattern", 0, 0, 0, 0, 0, new IntPtr(HwndMessage), IntPtr.Zero, module, IntPtr.Zero);
         if (_window == IntPtr.Zero) { _running = false; return; }
         Instances[_window] = this;
-        AddTrayIcon(_window);
-        try { while (_running && GetMessage(out var message, IntPtr.Zero, 0, 0) > 0) { TranslateMessage(ref message); DispatchMessage(ref message); } }
+        var trayAdded = false;
+        try
+        {
+            AddTrayIcon(_window);
+            trayAdded = true;
+            while (_running && GetMessage(out var message, IntPtr.Zero, 0, 0) > 0) { TranslateMessage(ref message); DispatchMessage(ref message); }
+        }
+        catch
+        {
+            // A notification-area integration failure must not terminate the
+            // MAUI process; the main window remains usable without a tray icon.
+        }
         finally
         {
-            RemoveTrayIcon(_window);
+            if (trayAdded) RemoveTrayIcon(_window);
             Instances.Remove(_window);
             DestroyWindow(_window);
             UnregisterClass(ClassName, module);
