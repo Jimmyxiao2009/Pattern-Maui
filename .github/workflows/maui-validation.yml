@@ -56,4 +56,4 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet workload install maui-maccatalyst
       - run: dotnet restore apps/maui/Pattern.Maui.csproj -p:TargetFrameworks=net10.0-maccatalyst
-      - run: dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-maccatalyst --no-restore -p:Configuration=Debug
+      - run: dotnet build apps/maui/Pattern.Maui.csproj -f net10.0-maccatalyst --no-restore -p:Configuration=Debug -p:ValidateXcodeVersion=false
