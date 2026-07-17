@@ -13,6 +13,8 @@ public sealed record RuntimeProfile(
     bool ProactivePaused,
     int BedtimeHour);
 
+public sealed record ConversationSession(string Id, string Title, List<ChatTurn> Messages, bool Archived, DateTimeOffset UpdatedAt);
+
 /// <summary>
 /// Small persistence boundary for MAUI. Non-secret preferences use the platform
 /// preferences store; the API key is kept in SecureStorage and never included in
@@ -23,6 +25,7 @@ public sealed class AppSettingsStore
     private const string ProfileKey = "pattern.runtime.profile";
     private const string ApiKeyKey = "pattern.runtime.api-key";
     private const string ConversationKey = "pattern.conversation.history";
+    private const string SessionsKey = "pattern.conversation.sessions";
 
     public RuntimeProfile LoadProfile()
     {
@@ -76,4 +79,15 @@ public sealed class AppSettingsStore
     public void SaveConversationHistory(string value) => Preferences.Default.Set(ConversationKey, value);
 
     public void ClearConversationHistory() => Preferences.Default.Remove(ConversationKey);
+
+    public List<ConversationSession> LoadConversationSessions()
+    {
+        var raw = Preferences.Default.Get(SessionsKey, string.Empty);
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        try { return JsonSerializer.Deserialize<List<ConversationSession>>(raw) ?? []; }
+        catch { Preferences.Default.Remove(SessionsKey); return []; }
+    }
+
+    public void SaveConversationSessions(IEnumerable<ConversationSession> sessions) =>
+        Preferences.Default.Set(SessionsKey, JsonSerializer.Serialize(sessions));
 }

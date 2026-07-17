@@ -23,11 +23,13 @@ public partial class MainPage : ContentPage
     private readonly GlobalHotkeyService _hotkey;
     private readonly WindowsTrayService _tray;
     private readonly List<ChatTurn> _history = [];
+    private readonly List<ConversationSession> _sessions = [];
     private readonly Dictionary<string, View> _views = [];
     private Label? _conversationLabel;
     private Entry? _messageEntry;
     private Button? _cancelButton;
     private string? _activeChatId;
+    private string _activeSessionId = "default";
     private string _conversation = "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。";
     private string _activeAssistantText = string.Empty;
     private bool _loaded;
@@ -120,24 +122,50 @@ public partial class MainPage : ContentPage
     {
         try
         {
-            var raw = _settings.LoadConversationHistory();
-            if (!string.IsNullOrWhiteSpace(raw))
+            _sessions.AddRange(_settings.LoadConversationSessions());
+            if (_sessions.Count == 0)
             {
-                var turns = JsonSerializer.Deserialize<List<ChatTurn>>(raw, JsonOptions);
-                if (turns is not null) _history.AddRange(turns.TakeLast(100));
-                if (_history.Count > 0)
-                {
-                    _conversation = string.Join("\n\n", _history.Select(turn => turn.Role == "user" ? $"你：{turn.Content}" : $"Pattern：{turn.Content}"));
-                }
+                var raw = _settings.LoadConversationHistory();
+                var turns = string.IsNullOrWhiteSpace(raw) ? [] : JsonSerializer.Deserialize<List<ChatTurn>>(raw, JsonOptions) ?? [];
+                _sessions.Add(new ConversationSession("default", "默认会话", turns.TakeLast(100).ToList(), false, DateTimeOffset.UtcNow));
             }
+            var active = _sessions.FirstOrDefault(item => !item.Archived) ?? _sessions[0];
+            ActivateSession(active.Id, persist: false);
         }
         catch { _history.Clear(); }
     }
 
     private void SaveHistory()
     {
-        try { _settings.SaveConversationHistory(JsonSerializer.Serialize(_history.TakeLast(100), JsonOptions)); }
+        try
+        {
+            UpdateActiveSession();
+            _settings.SaveConversationSessions(_sessions);
+            _settings.SaveConversationHistory(JsonSerializer.Serialize(_history.TakeLast(100), JsonOptions));
+        }
         catch { /* persistence must never break chat */ }
+    }
+
+    private void UpdateActiveSession()
+    {
+        var index = _sessions.FindIndex(item => item.Id == _activeSessionId);
+        if (index < 0) return;
+        _sessions[index] = _sessions[index] with { Messages = _history.TakeLast(100).ToList(), UpdatedAt = DateTimeOffset.UtcNow };
+    }
+
+    private void ActivateSession(string id, bool persist = true)
+    {
+        if (persist) UpdateActiveSession();
+        var session = _sessions.FirstOrDefault(item => item.Id == id);
+        if (session is null) return;
+        _activeSessionId = session.Id;
+        _history.Clear();
+        _history.AddRange(session.Messages.TakeLast(100));
+        _conversation = _history.Count == 0
+            ? "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。"
+            : string.Join("\n\n", _history.Select(turn => turn.Role == "user" ? $"你：{turn.Content}" : $"Pattern：{turn.Content}"));
+        if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+        if (persist) SaveHistory();
     }
 
     private async Task ConnectAsync()
@@ -355,20 +383,74 @@ public partial class MainPage : ContentPage
     private View CreateConversationsView()
     {
         var output = OutputEditor();
-        var refresh = new Button { Text = "查看本地历史" };
-        refresh.Clicked += (_, _) => output.Text = _history.Count == 0 ? "暂无本地会话" : string.Join("\n\n", _history.Select((item, index) => $"{index + 1}. {item.Role}: {item.Content}"));
-        var clear = new Button { Text = "清空历史" };
+        var picker = new Picker { Title = "选择会话", WidthRequest = 240 };
+        void RefreshPicker()
+        {
+            picker.ItemsSource = null;
+            picker.ItemsSource = _sessions.Where(item => !item.Archived).OrderByDescending(item => item.UpdatedAt).Select(item => $"{item.Title} · {item.Id[..Math.Min(8, item.Id.Length)]}").ToList();
+            var active = _sessions.Where(item => !item.Archived).OrderByDescending(item => item.UpdatedAt).ToList().FindIndex(item => item.Id == _activeSessionId);
+            if (active >= 0) picker.SelectedIndex = active;
+        }
+        picker.SelectedIndexChanged += (_, _) =>
+        {
+            var active = _sessions.Where(item => !item.Archived).OrderByDescending(item => item.UpdatedAt).ToList();
+            if (picker.SelectedIndex >= 0 && picker.SelectedIndex < active.Count) ActivateSession(active[picker.SelectedIndex].Id);
+        };
+        RefreshPicker();
+        var refresh = new Button { Text = "查看当前历史" };
+        refresh.Clicked += (_, _) => output.Text = _history.Count == 0 ? "暂无本地消息" : string.Join("\n\n", _history.Select((item, index) => $"{index + 1}. {item.Role}: {item.Content}"));
+        var create = new Button { Text = "新建会话" };
+        create.Clicked += async (_, _) =>
+        {
+            var title = await DisplayPromptAsync("新建会话", "输入会话名称") ?? "";
+            if (string.IsNullOrWhiteSpace(title)) return;
+            UpdateActiveSession();
+            var session = new ConversationSession(Guid.NewGuid().ToString("N"), title.Trim(), [], false, DateTimeOffset.UtcNow);
+            _sessions.Add(session);
+            ActivateSession(session.Id);
+            RefreshPicker();
+            output.Text = $"已创建会话：{title.Trim()}";
+        };
+        var rename = new Button { Text = "重命名" };
+        rename.Clicked += async (_, _) =>
+        {
+            var session = _sessions.FirstOrDefault(item => item.Id == _activeSessionId);
+            if (session is null) return;
+            var title = await DisplayPromptAsync("重命名会话", "输入新名称", initialValue: session.Title);
+            if (string.IsNullOrWhiteSpace(title)) return;
+            _sessions[_sessions.IndexOf(session)] = session with { Title = title.Trim(), UpdatedAt = DateTimeOffset.UtcNow };
+            SaveHistory(); RefreshPicker(); output.Text = "会话名称已更新";
+        };
+        var archive = new Button { Text = "归档当前" };
+        archive.Clicked += (_, _) =>
+        {
+            var index = _sessions.FindIndex(item => item.Id == _activeSessionId);
+            if (index < 0 || _sessions.Count(item => !item.Archived) <= 1) return;
+            _sessions[index] = _sessions[index] with { Archived = true, UpdatedAt = DateTimeOffset.UtcNow };
+            var next = _sessions.First(item => !item.Archived);
+            ActivateSession(next.Id); RefreshPicker(); output.Text = "会话已归档";
+        };
+        var delete = new Button { Text = "删除当前" };
+        delete.Clicked += (_, _) =>
+        {
+            var index = _sessions.FindIndex(item => item.Id == _activeSessionId);
+            if (index < 0 || _sessions.Count <= 1) return;
+            _sessions.RemoveAt(index);
+            var next = _sessions.FirstOrDefault(item => !item.Archived) ?? _sessions[0];
+            ActivateSession(next.Id); RefreshPicker(); output.Text = "会话已删除";
+        };
+        var clear = new Button { Text = "清空当前消息" };
         clear.Clicked += (_, _) =>
         {
             _history.Clear();
             _conversation = "会话已清空。";
-            _settings.ClearConversationHistory();
             if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+            SaveHistory();
             output.Text = "已清空本地会话历史";
         };
         var plan = new Button { Text = "读取当前计划" };
-        plan.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "session_plan.get", conversationId = "default" }, output);
-        return FeatureRoot("会话管理", new HorizontalStackLayout { Spacing = 8, Children = { refresh, clear, plan } }, output);
+        plan.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "session_plan.get", conversationId = _activeSessionId }, output);
+        return FeatureRoot("会话管理", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { picker, refresh, create, rename, archive, delete, clear, plan } } }, output);
     }
 
     private View CreateMemoryView()
@@ -716,7 +798,7 @@ public partial class MainPage : ContentPage
                 StatusLabel.Text = _relay.Status.Online ? "消息已发送到中继" : "已进入离线 outbox";
                 return;
             }
-            _activeChatId = await _runtime.SendChatAsync(text, priorHistory);
+            _activeChatId = await _runtime.SendChatAsync(text, priorHistory, _activeSessionId);
             _history.Add(new ChatTurn("user", text));
             if (_cancelButton is not null) _cancelButton.IsEnabled = true;
             StatusLabel.Text = "Pattern 正在思考…";
