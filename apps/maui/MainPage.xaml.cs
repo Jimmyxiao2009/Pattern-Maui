@@ -131,6 +131,8 @@ public partial class MainPage : ContentPage
     {
         try
         {
+            _sessions.Clear();
+            _history.Clear();
             _sessions.AddRange(_settings.LoadConversationSessions());
             if (_sessions.Count == 0)
             {
@@ -767,7 +769,67 @@ public partial class MainPage : ContentPage
                 : new[] { new { id = Guid.NewGuid().ToString("N"), time = time.Trim(), message = message.Trim(), enabled = true } }.Cast<object>().ToArray();
             await RequestToEditorAsync(new { type = "cron.setConfig", triggers }, output, "Cron 已更新");
         };
-        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron } } }, output);
+        var exportBackup = new Button { Text = "导出客户端备份" };
+        exportBackup.Clicked += async (_, _) => await ExportBackupAsync(output);
+        var importBackup = new Button { Text = "导入客户端备份" };
+        importBackup.Clicked += async (_, _) => await ImportBackupAsync(output);
+        var backupHint = new Label { Text = "备份包含配置与会话，不包含 API Key/Relay 密钥", FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center };
+        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, backupHint } } }, output);
+    }
+
+    private async Task ExportBackupAsync(Editor output)
+    {
+        try
+        {
+            var backup = _settings.CreateBackup(_relay.CurrentSettings);
+            var json = JsonSerializer.Serialize(backup, JsonOptions);
+            var path = System.IO.Path.Combine(FileSystem.CacheDirectory, $"pattern-backup-{DateTime.UtcNow:yyyyMMdd-HHmmss}.json");
+            await File.WriteAllTextAsync(path, json);
+            try
+            {
+                await Share.Default.RequestAsync(new ShareFileRequest
+                {
+                    Title = "Pattern 客户端备份",
+                    File = new ShareFile(path),
+                });
+                output.Text = $"备份已生成并打开系统分享：\n{path}\n\nAPI Key 与 Relay 密钥未包含在备份中。";
+            }
+            catch (Exception shareError)
+            {
+                output.Text = $"备份已生成（系统分享不可用）：\n{path}\n{shareError.Message}";
+            }
+            StatusLabel.Text = "客户端备份已导出";
+        }
+        catch (Exception error)
+        {
+            output.Text = $"导出失败：{error.Message}";
+            StatusLabel.Text = "客户端备份导出失败";
+        }
+    }
+
+    private async Task ImportBackupAsync(Editor output)
+    {
+        try
+        {
+            var file = await FilePicker.Default.PickAsync(new PickOptions { PickerTitle = "选择 Pattern JSON 备份" });
+            if (file is null) return;
+            await using var stream = await file.OpenReadAsync();
+            if (stream.Length > 8 * 1024 * 1024) throw new InvalidOperationException("备份文件超过 8 MB 限制。");
+            using var reader = new StreamReader(stream);
+            var json = await reader.ReadToEndAsync();
+            var backup = AppSettingsStore.ParseBackup(json);
+            _settings.RestoreBackup(backup);
+            LoadHistory();
+            output.Text = $"已导入 {backup.Sessions.Count} 个会话（版本 {backup.Version}）。API Key 与 Relay 密钥不会被覆盖，请在设置/通道页重新配置。";
+            StatusLabel.Text = "客户端备份已导入";
+            ShowView("conversations");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            output.Text = $"导入失败：{error.Message}";
+            StatusLabel.Text = "客户端备份导入失败";
+        }
     }
 
     private async Task ControlByPromptAsync(string title, Func<string, object> requestFactory, Editor output)

@@ -57,7 +57,7 @@
 
 ### Phase 5 — 迁移收口
 
-- 将旧 Svelte 页面逐项对照验收并删除 MAUI 占位页；补齐深链接、导入导出、备份恢复和数据 schema migration。
+- 将旧 Svelte 页面逐项对照验收并删除 MAUI 占位页；补齐深链接、客户端配置/会话导入导出、备份恢复和数据 schema migration。
 - TypeScript strict typecheck、C# analyzers、端到端测试和崩溃日志脱敏。
 - 归档 Tauri/Rust 源码只读保存，工作区只保留纯源码和文档，不提交 `bin/obj/dist/node_modules`。
 
@@ -69,6 +69,7 @@
 4. 请求无统一超时/断线清理会造成页面永久 loading；`RequestAsync` 增加超时，断线统一结束 pending waiter。
 5. Android 不能直接运行 Node sidecar；明确 relay-only 状态和配对错误，避免假装本地 Agent 已启动。
 6. 当前 `dotnet run` 在无桌面会话的构建环境出现 Windows App SDK `0xC000027B`，不等同于 sidecar 连接失败；CI 以 build + stdio 集成为准，真实桌面机执行 GUI smoke test。
+7. 客户端设置页提供版本化 JSON 备份导入/导出，并迁移旧的无版本备份格式；API Key、WebDAV 密码和频道密钥永不进入备份。
 
 ## 当前可运行验收（2026-07-18）
 
@@ -80,6 +81,7 @@
 - `.github/workflows/maui-validation.yml`：在 Windows/macOS runner 上自动执行 sidecar strict/test、Windows/Android/Mac Catalyst Debug 构建；可在推送后完成 macOS 主机的最后验收。
 - Windows/macOS 运行时均使用 sidecar stdio；Windows 提供 tray、Ctrl+Alt+P 快捷聊天入口、单实例保护和本地恢复快照；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，并支持 `pattern://pair` 深链接配对，不要求用户访问 `127.0.0.1`。
 - 生成目录只用于本地构建，提交前执行仓库根目录的清理命令，归档目录 `archive/` 保持只读源码。
+- `pnpm maui:windows:debug`、`pnpm maui:android:debug`、`pnpm maui:mac:debug` 会自动 restore，干净 checkout 不再依赖遗留 `obj` 目录；Windows 调试脚本会先构建 sidecar。
 
 ## 每阶段完成定义
 

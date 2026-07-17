@@ -8,4 +8,15 @@ The MAUI client replaces the browser/WebView application surface. On Windows and
 pnpm maui:windows
 ```
 
+For a clean Debug build (the command restores .NET dependencies automatically):
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm maui:windows:debug
+```
+
+The Settings page can export/import a versioned JSON client backup. It contains
+the profile and conversation sessions, but never API keys or relay secrets;
+those remain in the platform secure store.
+
 Set `PATTERN_SIDECAR_PATH` to an absolute `sidecar/dist/index.cjs` path if launching outside the repository. Android remains a thin relay client until the Node runtime is moved into a remote/service deployment.
