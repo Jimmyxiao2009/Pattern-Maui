@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Maui.Controls.Shapes;
+using Microsoft.Maui.Storage;
 using Pattern.Maui.Services;
 
 namespace Pattern.Maui;
@@ -388,6 +389,12 @@ public partial class MainPage : ContentPage
         {
             await _relay.InitializeAsync();
             AppendRelayMessages(_relay.DrainInbox());
+            if (Preferences.Default.Get("pattern.pending.open.chat", false))
+            {
+                Preferences.Default.Remove("pattern.pending.open.chat");
+                ShowView("chat");
+                StatusLabel.Text = "已打开中继消息会话";
+            }
         }
         catch (Exception error) { StatusLabel.Text = $"中继状态读取失败：{error.Message}"; }
     }
@@ -898,7 +905,50 @@ public partial class MainPage : ContentPage
         };
         var settings = new Button { Text = "打开通道设置" };
         settings.Clicked += (_, _) => ShowView("settings");
-        return FeatureRoot("通道与设备中继", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { status, sync, pair, secureRequest, secureResponse, telegram, email, manual, settings } } }, output);
+        var pluginStates = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var pluginId = new Entry { Placeholder = "插件 ID", WidthRequest = 170 };
+        var pluginList = new Button { Text = "发现插件" };
+        pluginList.Clicked += async (_, _) =>
+        {
+            try
+            {
+                var response = await _runtime.RequestAsync(new { type = "channel.plugins.list" });
+                pluginStates.Clear();
+                if (response.TryGetProperty("plugins", out var items) && items.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in items.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("manifest", out var manifest) && manifest.TryGetProperty("id", out var id))
+                            pluginStates[id.GetString() ?? ""] = item.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean();
+                    }
+                }
+                output.Text = Format(response);
+            }
+            catch (Exception error) { output.Text = $"插件发现失败：{error.Message}"; }
+        };
+        var pluginToggle = new Button { Text = "切换插件" };
+        pluginToggle.Clicked += async (_, _) =>
+        {
+            var id = pluginId.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(id)) { output.Text = "请输入插件 ID。"; return; }
+            if (!pluginStates.ContainsKey(id))
+            {
+                output.Text = "请先点击“发现插件”，确认该插件存在。";
+                return;
+            }
+            pluginStates[id] = !pluginStates[id];
+            try
+            {
+                var response = await _runtime.RequestAsync(new
+                {
+                    type = "channel.plugins.set",
+                    plugins = pluginStates.Select(item => new { id = item.Key, enabled = item.Value }).ToArray(),
+                });
+                output.Text = Format(response);
+            }
+            catch (Exception error) { output.Text = $"插件设置失败：{error.Message}"; }
+        };
+        return FeatureRoot("通道与设备中继", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { status, sync, pair, secureRequest, secureResponse, telegram, email, manual, pluginList, pluginId, pluginToggle, settings } } }, output);
     }
 
     private View CreateModelsView()

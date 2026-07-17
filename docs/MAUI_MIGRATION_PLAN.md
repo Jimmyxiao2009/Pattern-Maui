@@ -46,7 +46,7 @@
 - WebDAV relay 配对、设备密钥、AES-GCM envelope、X25519/XChaCha20、cursor/outbox/offline retry。
 - MAUI Android 支持深链、加密响应、后台前台服务和消息通知；桌面端可生成加密配对响应。
 - Telegram、SMTP、IMAP 和本地 channel plugin 管理。
-- Android 前台同步服务、通知点击回到会话、网络切换和后台重试。
+- Android 前台同步服务、通知点击回到会话、网络切换和后台重试；通知点击会带回聊天页并消费后台 inbox。
 - 验收：断网期间消息进入 outbox，恢复网络后按 cursor 幂等同步。
 
 ### Phase 4 — 原生平台体验
@@ -75,6 +75,7 @@
 8. Agent 数据快照由 sidecar 统一生成和导入，MAUI 只负责文件选择与系统分享；快照写入前完成完整校验，避免部分导入。
 9. 项目文件树和文本预览统一走 sidecar `workspace.list/read`，经过真实路径解析、workspace policy、隐藏目录过滤和大小上限校验；附件路径随聊天请求传给 Agent。
 10. 模型配置支持多个非密钥 profile，客户端备份包含 profile 列表，sidecar 的部分 runtime.configure 不会清空已有 relay/model 配置。
+11. 通道页支持发现并启停本地 channel plugin；插件凭据不经 MAUI 配置面板回显，sidecar 只加载显式启用且通过 manifest 路径校验的插件。
 
 ## 当前可运行验收（2026-07-18）
 

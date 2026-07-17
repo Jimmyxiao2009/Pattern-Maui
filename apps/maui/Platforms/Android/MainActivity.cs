@@ -17,6 +17,7 @@ public class MainActivity : MauiAppCompatActivity
     {
         base.OnCreate(savedInstanceState);
         SavePairingIntent(Intent);
+        SaveOpenChatIntent(Intent);
         if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
             RequestNotificationPermission();
         var intent = new Intent(this, typeof(RelaySyncService));
@@ -28,6 +29,7 @@ public class MainActivity : MauiAppCompatActivity
     {
         base.OnNewIntent(intent);
         SavePairingIntent(intent);
+        SaveOpenChatIntent(intent);
     }
 
     private static void SavePairingIntent(Intent? intent)
@@ -35,6 +37,12 @@ public class MainActivity : MauiAppCompatActivity
         var value = intent?.DataString;
         if (!string.IsNullOrWhiteSpace(value) && value.StartsWith("pattern://pair", StringComparison.OrdinalIgnoreCase))
             Preferences.Default.Set("pattern.pending.pairing", value);
+    }
+
+    private static void SaveOpenChatIntent(Intent? intent)
+    {
+        if (intent?.GetBooleanExtra("pattern.open.chat", false) == true)
+            Preferences.Default.Set("pattern.pending.open.chat", true);
     }
 
     [SupportedOSPlatform("android26.0")]

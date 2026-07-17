@@ -436,6 +436,8 @@ export type ClientMessage =
   | { type: 'proactive.trigger'; id: string; kind?: string; reason?: string }
   | { type: 'relay.status'; id: string }
   | { type: 'relay.syncNow'; id: string }
+  | { type: 'channel.plugins.list'; id: string }
+  | { type: 'channel.plugins.set'; id: string; plugins: ChannelPluginConfig[] }
   | { type: 'task.list'; id: string }
   | { type: 'task.create'; id: string; title: string; detail?: string; schedule?: TaskSchedule; plan?: TaskPlanStep[]; conversationId?: string; workspace?: string; projectName?: string }
   | { type: 'task.update'; id: string; taskId: string; title: string; detail?: string; schedule: TaskSchedule; plan?: TaskPlanStep[] }
@@ -513,6 +515,7 @@ export type ServerMessage =
   | { type: 'cron.config'; id: string; triggers: CronTriggerConfig[] }
   | { type: 'proactive.impulse'; item: ProactiveLogItem }
   | { type: 'relay.status.result'; id: string; status: RelayStatus }
+  | { type: 'channel.plugins'; id: string; plugins: Array<{manifest: {id: string; name: string; version: string; description?: string}; enabled: boolean; loaded: boolean}> }
   | { type: 'task.list.result'; id: string; tasks: TaskRecord[]; createdTask?: TaskRecord }
   | { type: 'task.updated'; task: TaskRecord }
   | { type: 'task.approval_required'; taskId: string; step: TaskStep; screenshotBase64?: string }

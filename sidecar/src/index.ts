@@ -4117,6 +4117,26 @@ case 'journal.list': {
         send(socket, {type: 'relay.status.result', id: message.id, status: relay.status()});
         break;
       }
+      case 'channel.plugins.list': {
+        send(socket, {type: 'channel.plugins', id: message.id, plugins: channelPluginView()});
+        break;
+      }
+      case 'channel.plugins.set': {
+        const discovered = new Map(discoverChannelPlugins(join(dataDir, 'plugins')).map((plugin) => [plugin.manifest.id, plugin]));
+        const previous = new Map((config?.plugins || []).map((item) => [item.id, item]));
+        const plugins = (Array.isArray(message.plugins) ? message.plugins : [])
+          .filter((item) => discovered.has(String(item?.id || '')))
+          .map((item) => ({
+            id: String(item.id),
+            enabled: item.enabled === true,
+            // Plugin credentials stay in the plugin's own store. Preserve
+            // existing opaque config when the UI only changes the toggle.
+            config: item.config ?? previous.get(String(item.id))?.config,
+          }));
+        if (config) applyConfig({...config, plugins});
+        send(socket, {type: 'channel.plugins', id: message.id, plugins: channelPluginView()});
+        break;
+      }
       case 'task.list': {
         send(socket, {type: 'task.list.result', id: message.id, tasks});
         break;
@@ -4773,6 +4793,15 @@ sockets.on('connection', (socket) => {
 const stdioSocket = stdioMode ? new StdioSocket() : null;
 if (stdioSocket) {
   clients.add(stdioSocket);
+}
+
+function channelPluginView() {
+  const enabled = new Map((config?.plugins || []).filter((item) => item?.id).map((item) => [item.id, item.enabled]));
+  return discoverChannelPlugins(join(dataDir, 'plugins')).map((plugin) => ({
+    manifest: plugin.manifest,
+    enabled: enabled.get(plugin.manifest.id) === true,
+    loaded: pluginChannels.has(plugin.manifest.id),
+  }));
 }
 const stdin = createInterface({input: process.stdin});
 stdin.on('line', (line) => {

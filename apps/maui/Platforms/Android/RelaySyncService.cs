@@ -73,6 +73,7 @@ public sealed class RelaySyncService : Service
     {
         var intent = new Intent(this, typeof(MainActivity));
         intent.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop);
+        intent.PutExtra("pattern.open.chat", true);
         var flags = PendingIntentFlags.UpdateCurrent;
         if (Build.VERSION.SdkInt >= BuildVersionCodes.M) flags |= PendingIntentFlags.Immutable;
         var pending = PendingIntent.GetActivity(this, 1002, intent, flags);
