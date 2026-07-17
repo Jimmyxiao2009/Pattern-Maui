@@ -457,8 +457,8 @@ export type ClientMessage =
   | { type: 'runtime.foreground'; id: string };
 
 export type ServerMessage =
-  | { type: 'runtime.ready' }
-  | { type: 'runtime.status'; sidecar: string; memory: string; proactive: string; relay: string; version: string }
+  | { type: 'runtime.ready'; transport?: 'websocket' | 'stdio' }
+  | { type: 'runtime.status'; id?: string; sidecar: string; memory: string; proactive: string; relay: string; version: string }
   | { type: 'runtime.agent_state'; state: 'idle' | 'thinking' | 'executing' | 'paused' | 'approval' }
   | { type: 'chat.started'; id: string; slot?: AgentSlot }
   | { type: 'chat.delta'; id: string; delta: string }

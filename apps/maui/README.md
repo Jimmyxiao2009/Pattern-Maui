@@ -1,6 +1,6 @@
 # Pattern MAUI
 
-The MAUI client replaces the browser/WebView application surface. It starts the existing Node sidecar itself, so users never navigate to a `127.0.0.1` page.
+The MAUI client replaces the browser/WebView application surface. On Windows and macOS it starts the existing Node sidecar itself over authenticated JSONL stdio, so users never navigate to a `127.0.0.1` page or depend on a loopback port. Android is a WebDAV relay client.
 
 ## Run on Windows
 

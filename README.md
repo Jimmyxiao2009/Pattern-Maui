@@ -1,6 +1,6 @@
 # Pattern
 
-Pattern is a personal AI companion whose agent runtime runs as a Node sidecar. The client is now .NET MAUI (Windows + Android target) and no longer opens a browser or Vite/Tauri development URL.
+Pattern is a personal AI companion whose agent runtime runs as a Node sidecar. The client is now .NET MAUI (Windows, Android and macOS Catalyst targets) and no longer opens a browser or Vite/Tauri development URL.
 
 ## Run the MAUI Windows client
 
@@ -12,11 +12,11 @@ pnpm sidecar:build
 pnpm maui:windows
 ```
 
-The MAUI process starts `sidecar/dist/index.cjs`, reads its random port/token from stdout, and connects internally. You do not need to visit `127.0.0.1` or keep a Vite server running. To use a packaged sidecar, set `PATTERN_SIDECAR_PATH` to its absolute path.
+The MAUI process starts `sidecar/dist/index.cjs --stdio` and communicates over authenticated JSONL stdin/stdout. It does not depend on a random loopback port, browser URL, firewall rule, or Vite server. To use a packaged sidecar, set `PATTERN_SIDECAR_PATH` and optionally `PATTERN_NODE_PATH` to absolute paths.
 
 ## Layout
 
-- `apps/maui` — native MAUI shell and the first chat surface.
+- `apps/maui` — native MAUI shell and the first chat surface (Windows/macOS local Agent; Android relay mode).
 - `sidecar` — model loop, memory, proactive features, channels, relay, and task runtime.
 - `packages/*` — shared protocol and business logic.
 

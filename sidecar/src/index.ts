@@ -1484,7 +1484,7 @@ async function completeChatOnce(
 }
 
 async function runCompanionToolLoop(
-  socket: WebSocket,
+  socket: TransportSocket,
   message: ChatRequest,
   baseSystem: string,
   signal?: AbortSignal,
@@ -1815,6 +1815,7 @@ let plaaState = '';
 const cronFired = new Set<string>();
 const pluginChannels = new Map<string, Channel>();
 let pluginUnsubscribers: Array<() => void> = [];
+const stdioMode = process.argv.includes('--stdio') || process.env.PATTERN_TRANSPORT === 'stdio';
 const server = createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, {'content-type': 'application/json'});
@@ -1825,9 +1826,24 @@ const server = createServer((req, res) => {
   res.end();
 });
 const sockets = new WebSocketServer({noServer: true});
-const clients = new Set<WebSocket>();
-const activeChats = new Map<string, {controller: AbortController; socket: WebSocket}>();
-function send(socket: WebSocket, value: ServerMessage | Record<string, unknown>) {
+interface TransportSocket {
+  readyState: number;
+  send(value: string): void;
+}
+
+/** A single-owner JSONL transport used by native MAUI clients. */
+class StdioSocket implements TransportSocket {
+  readyState = WebSocket.OPEN;
+  send(value: string) {
+    if (this.readyState !== WebSocket.OPEN) return;
+    process.stdout.write(`${value}\n`);
+  }
+  close() { this.readyState = WebSocket.CLOSED; }
+}
+
+const clients = new Set<TransportSocket>();
+const activeChats = new Map<string, {controller: AbortController; socket: TransportSocket}>();
+function send(socket: TransportSocket, value: ServerMessage | Record<string, unknown>) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
 }
 function broadcast(value: ServerMessage | Record<string, unknown>) {
@@ -2869,7 +2885,7 @@ memory.setEmbedder(async (text) => {
   return localEmbed(text);
 });
 async function streamChat(
-  socket: WebSocket,
+  socket: TransportSocket,
   message: ChatRequest,
   system: string,
   slot: AgentSlot = 'companion',
@@ -3111,7 +3127,7 @@ function announceTask(task: TaskRecord) {
   });
   void relay.publish(envelope).catch((error) => console.error('[pattern-sidecar] relay task publish failed', error));
 }
-async function chat(socket: WebSocket, message: ChatRequest) {
+async function chat(socket: TransportSocket, message: ChatRequest) {
   lastUserActivityAt = Math.floor(Date.now() / 1000);
   if (!config) {
     send(socket, {type: 'chat.error', id: message.id, message: 'runtime is not configured'});
@@ -3787,7 +3803,7 @@ async function runComputerUseTask(task: TaskRecord) {
     announceTask(task);
   }
 }
-async function handleClient(socket: WebSocket, message: ClientMessage) {
+async function handleClient(socket: TransportSocket, message: ClientMessage) {
   try {
     switch (message.type) {
       case 'chat.send':
@@ -4466,6 +4482,7 @@ case 'journal.list': {
       case 'runtime.ping': {
         send(socket, {
           type: 'runtime.status',
+          id: message.id,
           sidecar: 'connected',
           memory: 'ready',
           proactive: proactive.getConfig().paused ? 'paused' : 'ready',
@@ -4580,9 +4597,18 @@ sockets.on('connection', (socket) => {
     for (const active of activeChats.values()) if (active.socket === socket) active.controller.abort();
   });
 });
-createInterface({input: process.stdin}).on('line', (line) => {
+const stdioSocket = stdioMode ? new StdioSocket() : null;
+if (stdioSocket) {
+  clients.add(stdioSocket);
+}
+const stdin = createInterface({input: process.stdin});
+stdin.on('line', (line) => {
   try {
     const message = JSON.parse(line);
+    if (stdioSocket && message && typeof message.type === 'string') {
+      void handleClient(stdioSocket, message as ClientMessage);
+      return;
+    }
     if (message.method === 'runtime.configure') applyConfig(message.params as RuntimeConfigure);
     if (message.method === 'proactive.setPaused') proactive.setPaused(!!message.params?.paused);
     if (message.method === 'task.approve') {
@@ -4605,11 +4631,18 @@ createInterface({input: process.stdin}).on('line', (line) => {
     console.error('[pattern-sidecar] invalid stdin message', error);
   }
 });
+stdin.on('close', () => {
+  if (!stdioSocket) return;
+  stdioSocket.close();
+  clients.delete(stdioSocket);
+  for (const active of activeChats.values()) if (active.socket === stdioSocket) active.controller.abort();
+  process.exit(0);
+});
 // nightly consolidate + proactive + relay loops
 setInterval(() => {
   const d = new Date();
   if (d.getHours() === 3 && d.getMinutes() < 2) {
-    void runDreamingJob(false).then((result) => console.log('[pattern-sidecar] dreaming', result));
+    void runDreamingJob(false).then((result) => console.error('[pattern-sidecar] dreaming', result));
     memory.consolidate(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`);
   }
 }, 60_000);
@@ -4650,9 +4683,27 @@ setInterval(() => {
     }
   })();
 }, 15_000);
-server.listen(0, '127.0.0.1', () => {
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('cannot read sidecar port');
-  process.stdout.write(`${JSON.stringify({port: address.port, token})}\n`);
+server.once('error', (error) => {
+  console.error('[pattern-sidecar] server failed to start', error);
+  process.exitCode = 1;
 });
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('uncaughtException', (error) => {
+  console.error('[pattern-sidecar] uncaught exception', error);
+});
+process.on('unhandledRejection', (error) => {
+  console.error('[pattern-sidecar] unhandled rejection', error);
+});
+if (stdioMode) {
+  process.stdout.write(`${JSON.stringify({transport: 'stdio', pid: process.pid})}\n`);
+  if (stdioSocket) send(stdioSocket, {type: 'runtime.ready', transport: 'stdio'});
+} else {
+  server.listen(0, '127.0.0.1', () => {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('cannot read sidecar port');
+    process.stdout.write(`${JSON.stringify({transport: 'websocket', port: address.port, token, pid: process.pid})}\n`);
+  });
+}
+process.on('SIGTERM', () => {
+  if (server.listening) server.close(() => process.exit(0));
+  else process.exit(0);
+});

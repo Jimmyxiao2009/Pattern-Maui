@@ -10,6 +10,7 @@ import {dirname, join} from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const files = [
   'test/runtime.test.mjs',
+  'test/stdio.test.mjs',
   'test/memory.test.mjs',
   'test/relay.test.mjs',
   'test/channels.test.mjs',
