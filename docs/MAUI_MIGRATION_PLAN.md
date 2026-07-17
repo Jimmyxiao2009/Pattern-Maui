@@ -76,7 +76,7 @@
 - `pnpm sidecar:typecheck`：sidecar 与 workspace packages 的 TypeScript strict 检查通过；workspace alias、MCP、recovery、proactive 和 channel 类型已对齐。
 - `pnpm maui:windows:debug`：`net10.0-windows10.0.19041.0` Debug 编译通过。
 - `pnpm maui:android:debug`：`net10.0-android` Debug APK 编译通过（Android API analyzer 可能提示平台兼容性警告）。
-- Windows/macOS 运行时均使用 sidecar stdio；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，不要求用户访问 `127.0.0.1`。
+- Windows/macOS 运行时均使用 sidecar stdio；Windows 提供 Ctrl+Alt+P 快捷聊天入口和单实例保护；Android 不启动 Node，使用 WebDAV relay + 前台同步服务，并支持 `pattern://pair` 深链接配对，不要求用户访问 `127.0.0.1`。
 - 生成目录只用于本地构建，提交前执行仓库根目录的清理命令，归档目录 `archive/` 保持只读源码。
 
 ## 每阶段完成定义

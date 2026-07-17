@@ -2,6 +2,7 @@ using Android.App;
 using Android.Content;
 using Android.Content.PM;
 using Android.OS;
+using Microsoft.Maui.Storage;
 using System.Runtime.Versioning;
 
 #pragma warning disable CA1416 // SDK checks are explicit; Xamarin binding analyzer cannot infer helper guards
@@ -9,16 +10,31 @@ using System.Runtime.Versioning;
 namespace Pattern.Maui;
 
 [Activity(Theme = "@style/Maui.SplashTheme", MainLauncher = true, ConfigurationChanges = ConfigChanges.ScreenSize | ConfigChanges.Orientation | ConfigChanges.UiMode | ConfigChanges.ScreenLayout | ConfigChanges.SmallestScreenSize | ConfigChanges.Density)]
+[IntentFilter([Android.Content.Intent.ActionView], Categories = [Android.Content.Intent.CategoryDefault, Android.Content.Intent.CategoryBrowsable], DataScheme = "pattern", DataHost = "pair")]
 public class MainActivity : MauiAppCompatActivity
 {
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
+        SavePairingIntent(Intent);
         var intent = new Intent(this, typeof(RelaySyncService));
         if (Build.VERSION.SdkInt >= BuildVersionCodes.O) StartForegroundServiceO(intent);
         else StartService(intent);
         if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
             RequestNotificationPermission();
+    }
+
+    protected override void OnNewIntent(Intent? intent)
+    {
+        base.OnNewIntent(intent);
+        SavePairingIntent(intent);
+    }
+
+    private static void SavePairingIntent(Intent? intent)
+    {
+        var value = intent?.DataString;
+        if (!string.IsNullOrWhiteSpace(value) && value.StartsWith("pattern://pair", StringComparison.OrdinalIgnoreCase))
+            Preferences.Default.Set("pattern.pending.pairing", value);
     }
 
     [SupportedOSPlatform("android26.0")]

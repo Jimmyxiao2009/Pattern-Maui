@@ -22,6 +22,12 @@ public static class MauiProgram
             instance.Acquire();
             return instance;
         });
+        builder.Services.AddSingleton<GlobalHotkeyService>(_ =>
+        {
+            var hotkey = new GlobalHotkeyService();
+            hotkey.Start();
+            return hotkey;
+        });
         builder.Services.AddSingleton<AppSettingsStore>();
         builder.Services.AddSingleton<RelayService>();
         builder.Services.AddSingleton<MainPage>();

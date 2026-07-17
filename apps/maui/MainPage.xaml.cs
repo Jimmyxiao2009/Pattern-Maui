@@ -20,6 +20,7 @@ public partial class MainPage : ContentPage
     private readonly RelayService _relay;
     private readonly NativeBridgeService _bridge;
     private readonly SingleInstanceService _instance;
+    private readonly GlobalHotkeyService _hotkey;
     private readonly List<ChatTurn> _history = [];
     private readonly Dictionary<string, View> _views = [];
     private Label? _conversationLabel;
@@ -30,7 +31,7 @@ public partial class MainPage : ContentPage
     private string _activeAssistantText = string.Empty;
     private bool _loaded;
 
-    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance)
+    public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey)
     {
         InitializeComponent();
         _runtime = runtime;
@@ -38,7 +39,14 @@ public partial class MainPage : ContentPage
         _relay = relay;
         _bridge = bridge;
         _instance = instance;
+        _hotkey = hotkey;
         LoadHistory();
+        _hotkey.QuickChatRequested += () => MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ShowView("chat");
+            StatusLabel.Text = "快捷窗口已打开（Ctrl+Alt+P）";
+            _messageEntry?.Focus();
+        });
 
         foreach (var (id, label) in NavigationItems)
         {
@@ -127,9 +135,11 @@ public partial class MainPage : ContentPage
             await _relay.InitializeAsync();
             if (OperatingSystem.IsAndroid())
             {
-                await _relay.InitializeAsync();
+                var pairedFromLink = await _relay.ConsumePendingPairingAsync();
                 var relayStatus = _relay.Status;
-                StatusLabel.Text = relayStatus.Configured ? "移动端中继已配置 · 等待同步" : "移动端中继模式 · 请在通道页配对";
+                StatusLabel.Text = relayStatus.Configured
+                    ? (pairedFromLink ? "已通过配对链接配置中继 · 等待同步" : "移动端中继已配置 · 等待同步")
+                    : "移动端中继模式 · 请在通道页配对";
                 return;
             }
             await _runtime.StartAsync();

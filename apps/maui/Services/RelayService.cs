@@ -46,6 +46,19 @@ public sealed class RelayService
 
     public RelaySettings CurrentSettings => _settings;
 
+    public async Task<bool> ConsumePendingPairingAsync()
+    {
+        var raw = Preferences.Default.Get("pattern.pending.pairing", string.Empty);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        try
+        {
+            await SaveSettingsAsync(ParsePairingCode(raw));
+            Preferences.Default.Remove("pattern.pending.pairing");
+            return true;
+        }
+        catch { return false; }
+    }
+
     public async Task SaveSettingsAsync(RelaySettings settings)
     {
         _settings = settings with
