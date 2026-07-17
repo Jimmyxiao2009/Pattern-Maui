@@ -54,6 +54,11 @@ public partial class MainPage : ContentPage
             ShowView("chat");
             _messageEntry?.Focus();
         });
+        MacCatalystMenuService.QuickChatRequested += () => MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ShowView("chat");
+            _messageEntry?.Focus();
+        });
 
         foreach (var (id, label) in NavigationItems)
         {
