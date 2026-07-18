@@ -1085,9 +1085,9 @@ public partial class MainPage : ContentPage
             catch (Exception error) { output.Text = $"配置失败：{error.Message}"; }
         };
         var ping = new Button { Text = "运行时 Ping" };
-        ping.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "runtime.ping" }, output);
+        ping.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "runtime.ping" }, output, "运行时已连接");
         var health = new Button { Text = "健康检查配置" };
-        health.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "healthcheck.getConfig" }, output);
+        health.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "healthcheck.getConfig" }, output, "健康检查配置已读取");
         var setHealth = new Button { Text = "设置健康 URL" };
         setHealth.Clicked += async (_, _) =>
         {
@@ -1097,7 +1097,7 @@ public partial class MainPage : ContentPage
             await RequestToEditorAsync(new { type = "healthcheck.setConfig", checks }, output, "健康检查已更新");
         };
         var cron = new Button { Text = "Cron 配置" };
-        cron.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "cron.getConfig" }, output);
+        cron.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "cron.getConfig" }, output, "Cron 配置已读取");
         var setCron = new Button { Text = "设置每日 Cron" };
         setCron.Clicked += async (_, _) =>
         {
