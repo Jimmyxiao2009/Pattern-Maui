@@ -1331,10 +1331,54 @@ public partial class MainPage : ContentPage
     private View CreateProactiveView()
     {
         var output = OutputEditor();
+        var engineStatus = new Label { Text = "正在读取主动引擎…", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12 };
+        var chainList = new VerticalStackLayout { Spacing = 8 };
+        var inboxList = new VerticalStackLayout { Spacing = 8 };
+        async Task RefreshProactiveCardsAsync()
+        {
+            try
+            {
+                StatusLabel.Text = "正在读取主动能力…";
+                var configResponse = await _runtime.RequestAsync(new { type = "proactive.getConfig" });
+                var chainResponse = await _runtime.RequestAsync(new { type = "proactive.chain.list", limit = 30 });
+                var inboxResponse = await _runtime.RequestAsync(new { type = "proactive.list", limit = 40 });
+                chainList.Children.Clear();
+                inboxList.Children.Clear();
+                if (configResponse.TryGetProperty("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.True)
+                {
+                    var paused = configResponse.TryGetProperty("paused", out var pausedValue) && pausedValue.ValueKind == JsonValueKind.True;
+                    engineStatus.Text = paused ? "已暂停 · 主动引擎" : "运行中 · 主动引擎";
+                    engineStatus.TextColor = paused ? (Color)Application.Current!.Resources["TextMuted"] : (Color)Application.Current!.Resources["Positive"];
+                }
+                else
+                {
+                    engineStatus.Text = "已关闭 · 主动引擎";
+                    engineStatus.TextColor = (Color)Application.Current!.Resources["TextMuted"];
+                }
+                if (chainResponse.TryGetProperty("chains", out var chains) && chains.ValueKind == JsonValueKind.Array && chains.GetArrayLength() > 0)
+                    foreach (var chain in chains.EnumerateArray()) chainList.Children.Add(CreateProactiveChainCard(chain, output, RefreshProactiveCardsAsync));
+                else chainList.Children.Add(new Label { Text = "还没有主动链。引擎会在对话和任务中按需创建。", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12, Margin = new Thickness(4, 10) });
+                if (inboxResponse.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array && items.GetArrayLength() > 0)
+                    foreach (var item in items.EnumerateArray()) inboxList.Children.Add(CreateProactiveInboxCard(item, output));
+                else inboxList.Children.Add(new Label { Text = "没有待处理的主动消息", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12, Margin = new Thickness(4, 10) });
+                output.Text = "主动引擎数据已刷新。";
+                StatusLabel.Text = "主动能力已连接";
+            }
+            catch (Exception error)
+            {
+                chainList.Children.Clear();
+                inboxList.Children.Clear();
+                chainList.Children.Add(new Label { Text = "主动链读取失败，请检查运行时连接。", TextColor = (Color)Application.Current!.Resources["Danger"], FontSize = 12 });
+                inboxList.Children.Add(new Label { Text = "收件箱暂时不可用。", TextColor = (Color)Application.Current!.Resources["Danger"], FontSize = 12 });
+                engineStatus.Text = "未连接 · 主动引擎";
+                output.Text = $"主动能力读取失败：{error.Message}";
+                StatusLabel.Text = $"主动能力读取失败：{error.Message}";
+            }
+        }
         var refresh = new Button { Text = "刷新收件箱" };
-        refresh.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.list", limit = 100 }, output);
+        refresh.Clicked += async (_, _) => await RefreshProactiveCardsAsync();
         var chains = new Button { Text = "主动链" };
-        chains.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.chain.list", limit = 100 }, output);
+        chains.Clicked += async (_, _) => await RefreshProactiveCardsAsync();
         var mark = new Button { Text = "处理收件箱（按 ID）" };
         mark.Clicked += async (_, _) =>
         {
@@ -1349,11 +1393,11 @@ public partial class MainPage : ContentPage
         var cancelChain = new Button { Text = "取消主动链" };
         cancelChain.Clicked += async (_, _) => await ControlByPromptAsync("主动链 ID", id => new { type = "proactive.chain.cancel", chainId = id }, output);
         var trigger = new Button { Text = "手动触发" };
-        trigger.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.trigger", kind = "manual", reason = "MAUI 用户手动触发" }, output);
+        trigger.Clicked += async (_, _) => { await RequestToEditorAsync(new { type = "proactive.trigger", kind = "manual", reason = "MAUI 用户手动触发" }, output); await RefreshProactiveCardsAsync(); };
         var pause = new Button { Text = "暂停主动能力" };
-        pause.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.setPaused", paused = true }, output);
+        pause.Clicked += async (_, _) => { await RequestToEditorAsync(new { type = "proactive.setPaused", paused = true }, output); await RefreshProactiveCardsAsync(); };
         var resume = new Button { Text = "恢复主动能力" };
-        resume.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.setPaused", paused = false }, output);
+        resume.Clicked += async (_, _) => { await RequestToEditorAsync(new { type = "proactive.setPaused", paused = false }, output); await RefreshProactiveCardsAsync(); };
         var config = new Button { Text = "主动配置" };
         config.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "proactive.getConfig" }, output);
         var bedtime = new Button { Text = "设置睡眠小时" };
@@ -1362,7 +1406,46 @@ public partial class MainPage : ContentPage
             var value = await DisplayPromptAsync("睡眠小时", "输入 0-23");
             if (int.TryParse(value, out var hour)) await RequestToEditorAsync(new { type = "proactive.setConfig", bedtimeHour = Math.Clamp(hour, 0, 23) }, output);
         };
-        return FeatureRoot("主动能力", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { refresh, chains, mark, runChain, cancelChain, trigger, pause, resume, config, bedtime } } }, output);
+        var toolbar = new FlexLayout { Direction = FlexDirection.Row, Wrap = FlexWrap.Wrap, AlignItems = FlexAlignItems.Center, Children = { refresh, chains, mark, runChain, cancelChain, trigger, pause, resume, config, bedtime } };
+        var content = new VerticalStackLayout
+        {
+            Spacing = 14,
+            Children =
+            {
+                new Border { Padding = new Thickness(14, 10), BackgroundColor = (Color)Application.Current.Resources["PanelBackground"], Stroke = (Color)Application.Current.Resources["Line"], StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) }, Content = new VerticalStackLayout { Spacing = 4, Children = { new Label { Text = "AI 主动关心", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 12, FontAttributes = FontAttributes.Bold }, engineStatus, new Label { Text = "只管理 AI 会不会主动找你；每日提醒和循环任务留在任务页。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 } } } },
+                toolbar,
+                new Label { Text = "主动链", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 12, FontAttributes = FontAttributes.Bold },
+                chainList,
+                new Label { Text = "AI 主动收件箱", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 12, FontAttributes = FontAttributes.Bold, Margin = new Thickness(0, 8, 0, 0) },
+                inboxList,
+            },
+        };
+        _ = RefreshProactiveCardsAsync();
+        return FeatureRoot("主动能力", content, output);
+    }
+
+    private Border CreateProactiveChainCard(JsonElement chain, Editor output, Func<Task> refresh)
+    {
+        var id = chain.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
+        var purpose = chain.TryGetProperty("purpose", out var purposeValue) ? purposeValue.GetString() ?? "主动关心" : "主动关心";
+        var status = chain.TryGetProperty("status", out var statusValue) ? statusValue.GetString() ?? "active" : "active";
+        var label = status switch { "running" => "执行中", "completed" => "已完成", "cancelled" => "已取消", "failed" => "失败", _ => "进行中" };
+        var color = status switch { "completed" => (Color)Application.Current!.Resources["Positive"], "failed" => (Color)Application.Current!.Resources["Danger"], _ => (Color)Application.Current!.Resources["Accent"] };
+        var run = new Button { Text = "立即运行", FontSize = 10, Padding = new Thickness(8, 4) };
+        run.Clicked += async (_, _) => { if (!string.IsNullOrWhiteSpace(id)) output.Text = Format(await _runtime.RequestAsync(new { type = "proactive.chain.runNow", chainId = id })); await refresh(); };
+        var cancel = new Button { Text = "取消", FontSize = 10, Padding = new Thickness(8, 4) };
+        cancel.Clicked += async (_, _) => { if (!string.IsNullOrWhiteSpace(id)) output.Text = Format(await _runtime.RequestAsync(new { type = "proactive.chain.cancel", chainId = id })); await refresh(); };
+        return new Border { Padding = new Thickness(14, 10), BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"], Stroke = (Color)Application.Current.Resources["Line"], StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) }, Content = new VerticalStackLayout { Spacing = 7, Children = { new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = label, TextColor = color, FontSize = 10, FontAttributes = FontAttributes.Bold }, new Label { Text = id.Length > 8 ? id[..8] : id, TextColor = (Color)Application.Current.Resources["TextFaint"], FontFamily = "Consolas", FontSize = 10 } } }, new Label { Text = purpose, FontSize = 14, FontAttributes = FontAttributes.Bold }, new HorizontalStackLayout { Spacing = 6, Children = { run, cancel } } } } };
+    }
+
+    private Border CreateProactiveInboxCard(JsonElement item, Editor output)
+    {
+        var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
+        var body = item.TryGetProperty("body", out var bodyValue) ? bodyValue.GetString() ?? "主动消息" : "主动消息";
+        var reason = item.TryGetProperty("reason", out var reasonValue) ? reasonValue.GetString() ?? string.Empty : string.Empty;
+        var mark = new Button { Text = "标记已读", FontSize = 10, Padding = new Thickness(8, 4) };
+        mark.Clicked += async (_, _) => { if (!string.IsNullOrWhiteSpace(id)) output.Text = Format(await _runtime.RequestAsync(new { type = "proactive.inbox.mark", itemId = id, state = "read" })); };
+        return new Border { Padding = new Thickness(14, 10), BackgroundColor = (Color)Application.Current!.Resources["AccentWash"], Stroke = (Color)Application.Current.Resources["AccentLine"], StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) }, Content = new VerticalStackLayout { Spacing = 6, Children = { new Label { Text = body, FontSize = 13, LineHeight = 1.5 }, new Label { Text = string.IsNullOrWhiteSpace(reason) ? "AI 主动消息" : reason, TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 }, mark } } };
     }
 
     private View CreateSkillsView()
@@ -1780,12 +1863,156 @@ public partial class MainPage : ContentPage
                 backupHint,
             },
         };
-        var actions = new VerticalStackLayout
+        var personaSection = new VerticalStackLayout
         {
-            Spacing = 18,
-            Children = { connectionSection, new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"] }, runtimeSection, new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"] }, backupSection },
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "人格与角色", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "人格是本地配置，决定 Pattern 的称呼、语气和主动方式。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Label { Text = $"当前人格：{(string.IsNullOrWhiteSpace(profile.Persona) ? "默认陪伴" : "自定义人格")}", FontSize = 14, FontAttributes = FontAttributes.Bold },
+                new Label { Text = $"称呼：{profile.UserName}", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 12 },
+            },
         };
-        return FeatureRoot("设置与运行时", actions, output);
+        var personaActions = new HorizontalStackLayout { Spacing = 8 };
+        foreach (var (label, personaText) in new[]
+        {
+            ("温柔陪伴", "You are Pattern, a warm and patient personal AI companion. Be concise but empathetic."),
+            ("专注执行", "You are Pattern, a precise personal AI companion. Prefer actionable plans and clear next steps."),
+            ("简洁回答", "You are Pattern, a concise personal AI companion. Answer directly and avoid unnecessary prose."),
+        })
+        {
+            var choose = new Button { Text = label, FontSize = 11, Padding = new Thickness(10, 6) };
+            choose.Clicked += async (_, _) =>
+            {
+                var next = profile with { Persona = personaText };
+                _settings.SaveProfile(next);
+                try { await _runtime.ConfigureAsync(new { persona = next.Persona, personaName = "Pattern", userName = next.UserName }); output.Text = $"已切换人格：{label}"; }
+                catch (Exception error) { output.Text = $"人格已保存，运行时应用失败：{error.Message}"; }
+            };
+            personaActions.Children.Add(choose);
+        }
+        personaSection.Children.Add(personaActions);
+
+        var proactiveEnabled = new Switch { IsToggled = profile.ProactiveEnabled };
+        var proactivePaused = new Switch { IsToggled = profile.ProactivePaused };
+        var bedtime = new Entry { Text = profile.BedtimeHour.ToString(), Keyboard = Keyboard.Numeric, WidthRequest = 80 };
+        var saveProactive = new Button { Text = "保存主动设置" };
+        saveProactive.Clicked += async (_, _) =>
+        {
+            var hour = int.TryParse(bedtime.Text, out var parsed) ? Math.Clamp(parsed, 0, 23) : 23;
+            var next = profile with { ProactiveEnabled = proactiveEnabled.IsToggled, ProactivePaused = proactivePaused.IsToggled, BedtimeHour = hour };
+            _settings.SaveProfile(next);
+            try { await _runtime.ConfigureAsync(new { proactive = new { enabled = next.ProactiveEnabled, paused = next.ProactivePaused, bedtimeHour = next.BedtimeHour } }); output.Text = "主动设置已保存并应用。"; }
+            catch (Exception error) { output.Text = $"主动设置已保存，运行时应用失败：{error.Message}"; }
+        };
+        var proactiveSection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "主动能力", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "控制 Pattern 是否主动发起提醒和关心；循环任务仍在任务页管理。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto) }, Children = { new Label { Text = "启用主动能力", VerticalTextAlignment = TextAlignment.Center }, proactiveEnabled } },
+                new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto) }, Children = { new Label { Text = "暂时暂停", VerticalTextAlignment = TextAlignment.Center }, proactivePaused } },
+                new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "睡眠小时", VerticalTextAlignment = TextAlignment.Center }, bedtime } },
+                saveProactive,
+            },
+        };
+
+        var filewatchSection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "文件感知", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "只监听明确配置的工作区和扩展名，不会上传未授权文件。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Button { Text = "读取配置", Command = new Command(async () => await RequestToEditorAsync(new { type = "filewatch.getConfig" }, output)) },
+                new Button { Text = "查看事件", Command = new Command(async () => await RequestToEditorAsync(new { type = "filewatch.list", limit = 100 }, output)) },
+                new Button { Text = "打开文件监控页", Command = new Command(() => ShowView("filewatch")) },
+            },
+        };
+        var journalSection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "执行日志", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "查看模型调用、权限判断、任务和恢复操作的可审计回执。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Button { Text = "读取执行日志", Command = new Command(async () => await RequestToEditorAsync(new { type = "journal.list", limit = 100 }, output)) },
+            },
+        };
+        var privacySection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "隐私与权限", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "API Key 只进系统安全存储；桌面操作按风险等级和审批策略执行。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Button { Text = "读取安全策略", Command = new Command(async () => await RequestToEditorAsync(new { type = "security.policy.get" }, output)) },
+                new Button { Text = "读取恢复状态", Command = new Command(async () => await RequestToEditorAsync(new { type = "recovery.status" }, output)) },
+                new Button { Text = "前台窗口", Command = new Command(async () => await RequestToEditorAsync(new { type = "runtime.foreground" }, output)) },
+            },
+        };
+        var shortcutsSection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "快捷键", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "Windows：Ctrl+Alt+P 打开快捷对话；托盘菜单也可以打开主窗口。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Label { Text = "当前快捷键：Ctrl+Alt+P", FontFamily = "Consolas", FontSize = 12 },
+            },
+        };
+        var modelSection = new VerticalStackLayout
+        {
+            Spacing = 10,
+            Children =
+            {
+                new Label { Text = "模型", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = $"当前模型：{profile.Model}", FontSize = 14, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "模型连接、目录和用量指标已独立成页，保留设置页的快速入口。", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                new Button { Text = "打开模型与用量", Command = new Command(() => ShowView("models")) },
+            },
+        };
+
+        var sections = new Dictionary<string, View>(StringComparer.Ordinal)
+        {
+            ["general"] = connectionSection,
+            ["persona"] = personaSection,
+            ["model"] = modelSection,
+            ["proactive"] = proactiveSection,
+            ["filewatch"] = filewatchSection,
+            ["journal"] = journalSection,
+            ["privacy"] = privacySection,
+            ["shortcuts"] = shortcutsSection,
+            ["runtime"] = runtimeSection,
+            ["data"] = backupSection,
+        };
+        var tabButtons = new Dictionary<string, Button>(StringComparer.Ordinal);
+        var tabList = new VerticalStackLayout { Spacing = 4 };
+        var tabDefinitions = new[] { ("general", "常规"), ("persona", "人格与角色"), ("model", "模型"), ("proactive", "主动能力"), ("filewatch", "文件感知"), ("journal", "执行日志"), ("privacy", "隐私与权限"), ("shortcuts", "快捷键"), ("runtime", "运行时"), ("data", "数据与系统") };
+        var tabHost = new ContentView { HorizontalOptions = LayoutOptions.Fill, VerticalOptions = LayoutOptions.Start };
+        void SelectSettingsTab(string id)
+        {
+            tabHost.Content = new Border { Padding = new Thickness(18, 16), BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"], Stroke = (Color)Application.Current.Resources["Line"], StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) }, Content = new ScrollView { Content = sections[id] } };
+            foreach (var item in tabButtons)
+            {
+                item.Value.BackgroundColor = item.Key == id ? (Color)Application.Current.Resources["AccentWash"] : Colors.Transparent;
+                item.Value.TextColor = item.Key == id ? (Color)Application.Current.Resources["Accent"] : (Color)Application.Current.Resources["TextMuted"];
+            }
+        }
+        foreach (var (id, label) in tabDefinitions)
+        {
+            var tab = new Button { Text = label, HorizontalOptions = LayoutOptions.Fill, FontSize = 11, Padding = new Thickness(10, 8), BackgroundColor = Colors.Transparent, TextColor = (Color)Application.Current.Resources["TextMuted"], BorderWidth = 0, CornerRadius = 6 };
+            tab.Clicked += (_, _) => SelectSettingsTab(id);
+            tabList.Children.Add(tab);
+            tabButtons[id] = tab;
+        }
+        var settingsLayout = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(new GridLength(142)), new(GridLength.Star) }, ColumnSpacing = 18, Children = { new ScrollView { Content = tabList }, tabHost } };
+        Grid.SetColumn(tabHost, 1);
+        SelectSettingsTab("general");
+        return FeatureRoot("设置与运行时", settingsLayout, output);
     }
 
     private async Task ExportBackupAsync(Editor output)

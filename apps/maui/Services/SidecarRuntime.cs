@@ -25,6 +25,14 @@ public sealed class SidecarRuntime : IAsyncDisposable
     private bool _intentionalStop;
     private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _pending = [];
     private readonly Queue<string> _stderrTail = new();
+    // stdio and WebSocket transports both have a single ordered write stream.
+    // Serializing writes prevents concurrent page refreshes from interleaving
+    // JSON lines while the runtime is still completing its startup configure.
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    // Page cards often refresh together when a navigation view is created.
+    // Keep request/response pairs ordered so a reconnect cannot strand one page
+    // behind another pending request.
+    private readonly SemaphoreSlim _requestGate = new(1, 1);
 
     public event Action<string>? StatusChanged;
     public event Action<string>? ChatDelta;
@@ -69,6 +77,8 @@ public sealed class SidecarRuntime : IAsyncDisposable
                 RedirectStandardError = true,
                 CreateNoWindow = true,
                 WorkingDirectory = Path.GetDirectoryName(sidecar)!,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
             };
             processStart.ArgumentList.Add(sidecar);
             processStart.ArgumentList.Add("--stdio");
@@ -157,30 +167,45 @@ public sealed class SidecarRuntime : IAsyncDisposable
 
     public async Task<JsonElement> RequestAsync(object request, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
-        await EnsureConnectedAsync(cancellationToken);
-        var node = JsonSerializer.SerializeToNode(request)?.AsObject() ?? throw new InvalidOperationException("请求为空。");
-        var id = node["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
-        node["id"] = id;
-        var waiter = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_stateLock) _pending[id] = waiter;
+        await _requestGate.WaitAsync(cancellationToken);
         try
         {
-            await SendTextAsync(node.ToJsonString(), cancellationToken);
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linked.CancelAfter(timeout ?? TimeSpan.FromSeconds(20));
-            using var registration = linked.Token.Register(() => waiter.TrySetCanceled(linked.Token));
-            return await waiter.Task;
+            await EnsureConnectedAsync(cancellationToken);
+            var node = JsonSerializer.SerializeToNode(request)?.AsObject() ?? throw new InvalidOperationException("请求为空。");
+            var id = node["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
+            node["id"] = id;
+            var waiter = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_stateLock) _pending[id] = waiter;
+            try
+            {
+                await SendTextAsync(node.ToJsonString(), cancellationToken);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                linked.CancelAfter(timeout ?? TimeSpan.FromSeconds(20));
+                using var registration = linked.Token.Register(() => waiter.TrySetCanceled(linked.Token));
+                return await waiter.Task;
+            }
+            finally { lock (_stateLock) _pending.Remove(id); }
         }
-        finally { lock (_stateLock) _pending.Remove(id); }
+        finally { _requestGate.Release(); }
     }
 
     public async Task ConfigureAsync(object configuration, CancellationToken cancellationToken = default)
     {
-        var process = _process is { HasExited: false } running
-            ? running
-            : throw new InvalidOperationException("sidecar 未启动或已退出。");
-        await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { method = "runtime.configure", @params = configuration }));
-        await process.StandardInput.FlushAsync(cancellationToken);
+        await SendStdioControlAsync(JsonSerializer.Serialize(new { method = "runtime.configure", @params = configuration }), cancellationToken);
+    }
+
+    private async Task SendStdioControlAsync(string text, CancellationToken cancellationToken)
+    {
+        await _sendGate.WaitAsync(cancellationToken);
+        try
+        {
+            var process = _process is { HasExited: false } running
+                ? running
+                : throw new InvalidOperationException("sidecar 未启动或已退出。");
+            await process.StandardInput.WriteLineAsync(text);
+            await process.StandardInput.FlushAsync(cancellationToken);
+        }
+        finally { _sendGate.Release(); }
     }
 
     private Task ConfigureFromEnvironmentAsync(CancellationToken cancellationToken)
@@ -201,16 +226,21 @@ public sealed class SidecarRuntime : IAsyncDisposable
 
     private async Task SendTextAsync(string text, CancellationToken cancellationToken)
     {
-        if (_stdioMode)
+        await _sendGate.WaitAsync(cancellationToken);
+        try
         {
-            var process = _process ?? throw new InvalidOperationException("运行时未启动。");
-            await process.StandardInput.WriteLineAsync(text);
-            await process.StandardInput.FlushAsync(cancellationToken);
-            return;
+            if (_stdioMode)
+            {
+                var process = _process ?? throw new InvalidOperationException("运行时未启动。");
+                await process.StandardInput.WriteLineAsync(text);
+                await process.StandardInput.FlushAsync(cancellationToken);
+                return;
+            }
+            var socket = _socket ?? throw new InvalidOperationException("运行时未连接。");
+            if (socket.State != WebSocketState.Open) throw new InvalidOperationException("运行时连接已断开。");
+            await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, cancellationToken);
         }
-        var socket = _socket ?? throw new InvalidOperationException("运行时未连接。");
-        if (socket.State != WebSocketState.Open) throw new InvalidOperationException("运行时连接已断开。");
-        await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, cancellationToken);
+        finally { _sendGate.Release(); }
     }
 
     private async Task ReceiveStdoutLoopAsync(Process process, CancellationToken cancellationToken)
@@ -234,6 +264,7 @@ public sealed class SidecarRuntime : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception error) { if (!_intentionalStop) StatusChanged?.Invoke($"运行时输出读取失败：{error.Message}"); }
         finally
         {
             if (!_intentionalStop)
@@ -398,7 +429,13 @@ public sealed class SidecarRuntime : IAsyncDisposable
     {
         await _lifecycle.WaitAsync();
         try { _intentionalStop = true; await StopCoreAsync(); }
-        finally { _lifecycle.Release(); _lifecycle.Dispose(); }
+        finally
+        {
+            _lifecycle.Release();
+            _lifecycle.Dispose();
+            _sendGate.Dispose();
+            _requestGate.Dispose();
+        }
     }
 
     private async Task StopCoreAsync()

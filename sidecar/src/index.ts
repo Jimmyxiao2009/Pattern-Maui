@@ -1949,9 +1949,17 @@ interface TransportSocket {
 /** A single-owner JSONL transport used by native MAUI clients. */
 class StdioSocket implements TransportSocket {
   readyState: number = WebSocket.OPEN;
+  private writeQueue = Promise.resolve();
   send(value: string) {
     if (this.readyState !== WebSocket.OPEN) return;
-    process.stdout.write(`${value}\n`);
+    // Multiple async handlers can answer the same stdio client at once. Node's
+    // stream writes are not a JSONL framing boundary, so queue them explicitly
+    // or two responses can be concatenated into one unreadable line.
+    this.writeQueue = this.writeQueue
+      .then(() => new Promise<void>((resolve, reject) => {
+        process.stdout.write(`${value}\n`, (error) => error ? reject(error) : resolve());
+      }))
+      .catch(() => undefined);
   }
   close() { this.readyState = WebSocket.CLOSED; }
 }
