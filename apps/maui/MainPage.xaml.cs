@@ -30,6 +30,7 @@ public partial class MainPage : ContentPage
     private readonly Dictionary<string, View> _views = [];
     private readonly Dictionary<string, Button> _navigationButtons = [];
     private VerticalStackLayout? _conversationStack;
+    private VerticalStackLayout? _recentsStack;
     private Entry? _messageEntry;
     private Button? _cancelButton;
     private Button? _attachButton;
@@ -207,6 +208,7 @@ public partial class MainPage : ContentPage
             ? "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。"
             : string.Join("\n\n", _history.Select(turn => turn.Role == "user" ? $"你：{turn.Content}" : $"Pattern：{turn.Content}"));
         RefreshConversationView();
+        RefreshRecentsView();
         if (persist) SaveHistory();
     }
 
@@ -357,11 +359,96 @@ public partial class MainPage : ContentPage
         };
         Grid.SetRow(heading, 0);
         Grid.SetRow(transcript, 1);
-        return new Grid
+        var main = new Grid
         {
             RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto) },
             Children = { heading, transcript, composer },
         };
+        var shell = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(new GridLength(220)), new(GridLength.Star) } };
+        shell.Add(CreateRecentsSidebar(), 0, 0);
+        shell.Add(main, 1, 0);
+        return shell;
+    }
+
+    private View CreateRecentsSidebar()
+    {
+        _recentsStack = new VerticalStackLayout { Spacing = 4 };
+        RefreshRecentsView();
+        var newChat = new Button
+        {
+            Text = "＋ 新建对话",
+            HorizontalOptions = LayoutOptions.Fill,
+            BackgroundColor = (Color)Application.Current!.Resources["AccentWash"],
+            BorderColor = (Color)Application.Current.Resources["AccentLine"],
+            TextColor = (Color)Application.Current.Resources["Accent"],
+            BorderWidth = 1,
+            CornerRadius = 6,
+            FontSize = 11,
+            Padding = new Thickness(8, 6),
+        };
+        newChat.Clicked += (_, _) =>
+        {
+            var session = new ConversationSession(Guid.NewGuid().ToString("N"), "新对话", [], false, DateTimeOffset.UtcNow);
+            _sessions.Add(session);
+            ActivateSession(session.Id);
+            ShowView("chat");
+            StatusLabel.Text = "已新建对话";
+        };
+        var root = new VerticalStackLayout
+        {
+            Spacing = 12,
+            Children =
+            {
+                new Label { Text = "最近内容", TextColor = (Color)Application.Current.Resources["TextFaint"], FontSize = 10, FontAttributes = FontAttributes.Bold },
+                newChat,
+                new Label { Text = "最近聊天", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11, Margin = new Thickness(0, 8, 0, 0) },
+                _recentsStack,
+                new Label { Text = "主动收件箱", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11, Margin = new Thickness(0, 10, 0, 0) },
+                new Label { Text = "没有待处理的主动消息", TextColor = (Color)Application.Current.Resources["TextFaint"], FontSize = 10 },
+            },
+        };
+        return new Border
+        {
+            Padding = new Thickness(16, 24, 12, 18),
+            BackgroundColor = (Color)Application.Current.Resources["SurfaceBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            Content = new ScrollView { Content = root },
+        };
+    }
+
+    private void RefreshRecentsView()
+    {
+        if (_recentsStack is null) return;
+        _recentsStack.Children.Clear();
+        var recent = _sessions.Where(item => !item.Archived).OrderByDescending(item => item.UpdatedAt).Take(12).ToArray();
+        if (recent.Length == 0)
+        {
+            _recentsStack.Children.Add(new Label { Text = "还没有全局对话", TextColor = (Color)Application.Current!.Resources["TextFaint"], FontSize = 10, Padding = new Thickness(4, 8) });
+            return;
+        }
+        foreach (var session in recent)
+        {
+            var item = session;
+            var button = new Button
+            {
+                Text = item.Title,
+                HorizontalOptions = LayoutOptions.Fill,
+                BackgroundColor = item.Id == _activeSessionId ? (Color)Application.Current!.Resources["AccentWash"] : Colors.Transparent,
+                BorderColor = item.Id == _activeSessionId ? (Color)Application.Current!.Resources["AccentLine"] : Colors.Transparent,
+                TextColor = item.Id == _activeSessionId ? (Color)Application.Current!.Resources["Accent"] : (Color)Application.Current!.Resources["TextMuted"],
+                BorderWidth = 1,
+                CornerRadius = 6,
+                FontSize = 11,
+                Padding = new Thickness(8, 7),
+            };
+            button.Clicked += (_, _) =>
+            {
+                ActivateSession(item.Id);
+                ShowView("chat");
+            };
+            _recentsStack.Children.Add(button);
+        }
     }
 
     private void RefreshConversationView()
