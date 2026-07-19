@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Maui.Controls.Shapes;
+using Microsoft.Maui.Layouts;
 using Microsoft.Maui.Storage;
 using Pattern.Maui.Services;
 
@@ -990,14 +991,64 @@ public partial class MainPage : ContentPage
         var query = new Entry { Placeholder = "搜索记忆", WidthRequest = 220 };
         var category = new Entry { Placeholder = "分类（可选）", WidthRequest = 140 };
         var text = new Entry { Placeholder = "新增记忆内容", WidthRequest = 260 };
+        var memoryGrid = new FlexLayout
+        {
+            Direction = FlexDirection.Row,
+            Wrap = FlexWrap.Wrap,
+            AlignItems = FlexAlignItems.Stretch,
+            AlignContent = FlexAlignContent.Start,
+            JustifyContent = FlexJustify.Start,
+        };
+        async Task RefreshMemoryCardsAsync()
+        {
+            try
+            {
+                StatusLabel.Text = "正在读取记忆…";
+                var response = await _runtime.RequestAsync(new
+                {
+                    type = "memory.list",
+                    query = string.IsNullOrWhiteSpace(query.Text) ? null : query.Text,
+                    category = string.IsNullOrWhiteSpace(category.Text) ? null : category.Text,
+                });
+                memoryGrid.Children.Clear();
+                if (!response.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
+                {
+                    memoryGrid.Children.Add(new Label { Text = "还没有记忆，先保存一件值得长期记住的事。", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12, Margin = new Thickness(4, 18) });
+                    output.Text = Format(response);
+                    StatusLabel.Text = "记忆列表为空";
+                    return;
+                }
+                foreach (var item in items.EnumerateArray())
+                {
+                    var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
+                    var rawCategory = item.TryGetProperty("category", out var categoryValue) ? categoryValue.GetString() ?? "fact" : "fact";
+                    var label = rawCategory switch { "preference" => "偏好", "event" => "事件", "feedback" => "反馈", _ => "事实" };
+                    var value = item.TryGetProperty("text", out var textValue) ? textValue.GetString() ?? string.Empty : string.Empty;
+                    var importance = item.TryGetProperty("importance", out var importanceValue) && importanceValue.ValueKind == JsonValueKind.Number ? importanceValue.GetDouble() : 0.5;
+                    var expired = item.TryGetProperty("expired", out var expiredValue) && expiredValue.ValueKind == JsonValueKind.True;
+                    var meta = item.TryGetProperty("meta", out var metaValue) ? metaValue.GetString() ?? "本地记忆" : "本地记忆";
+                    memoryGrid.Children.Add(CreateMemoryCard(id, label, value, importance, expired, meta, output, RefreshMemoryCardsAsync));
+                }
+                output.Text = $"已加载 {items.GetArrayLength()} 条记忆。\n\n数据由 sidecar memory engine 提供。";
+                StatusLabel.Text = $"已加载 {items.GetArrayLength()} 条记忆";
+            }
+            catch (Exception error)
+            {
+                memoryGrid.Children.Clear();
+                memoryGrid.Children.Add(new Label { Text = "记忆读取失败，请检查运行时连接。", TextColor = (Color)Application.Current!.Resources["Danger"], FontSize = 12, Margin = new Thickness(4, 18) });
+                output.Text = $"记忆读取失败：{error.Message}";
+                StatusLabel.Text = "记忆读取失败";
+            }
+        }
         var refresh = new Button { Text = "搜索/刷新" };
-        refresh.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "memory.list", query = string.IsNullOrWhiteSpace(query.Text) ? null : query.Text, category = string.IsNullOrWhiteSpace(category.Text) ? null : category.Text }, output);
+        refresh.Clicked += async (_, _) => await RefreshMemoryCardsAsync();
         var add = new Button { Text = "记住" };
         add.Clicked += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(text.Text)) return;
             await RequestToEditorAsync(new { type = "memory.add", item = new { text = text.Text, category = string.IsNullOrWhiteSpace(category.Text) ? "fact" : category.Text, importance = 0.6 } }, output, "记忆已写入");
             text.Text = string.Empty;
+            await RefreshMemoryCardsAsync();
         };
         var proposals = new Button { Text = "提案" };
         proposals.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "memory.propose.list" }, output);
@@ -1009,7 +1060,53 @@ public partial class MainPage : ContentPage
         expire.Clicked += async (_, _) => await ControlByPromptAsync("记忆 ID", id => new { type = "memory.expire", memoryId = id }, output);
         var consolidate = new Button { Text = "固化" };
         consolidate.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "memory.consolidate" }, output);
-        return FeatureRoot("记忆", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { query, category, refresh, text, add, proposals, accept, reject, expire, consolidate } } }, output);
+        var toolbar = new FlexLayout { Direction = FlexDirection.Row, Wrap = FlexWrap.Wrap, AlignItems = FlexAlignItems.Center, JustifyContent = FlexJustify.Start, Children = { query, category, refresh, text, add, proposals, accept, reject, expire, consolidate } };
+        var content = new VerticalStackLayout { Spacing = 12, Children = { toolbar, memoryGrid } };
+        _ = RefreshMemoryCardsAsync();
+        return FeatureRoot("记忆", content, output);
+    }
+
+    private Border CreateMemoryCard(string id, string category, string text, double importance, bool expired, string meta, Editor output, Func<Task> refresh)
+    {
+        var stars = new string('★', Math.Clamp((int)Math.Round(importance > 1 ? importance : importance * 3), 1, 3));
+        var expire = new Button { Text = "过期", FontSize = 10, Padding = new Thickness(7, 4), TextColor = (Color)Application.Current!.Resources["TextMuted"], BorderColor = (Color)Application.Current.Resources["Line"] };
+        expire.Clicked += async (_, _) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(id)) return;
+                await _runtime.RequestAsync(new { type = "memory.expire", memoryId = id });
+                output.Text = $"已将记忆标记为过期：{id}";
+                await refresh();
+            }
+            catch (Exception error) { output.Text = $"过期记忆失败：{error.Message}"; }
+        };
+        var footer = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto) }, ColumnSpacing = 6 };
+        footer.Add(new Label { Text = meta, TextColor = (Color)Application.Current.Resources["TextFaint"], FontFamily = "Consolas", FontSize = 10, LineBreakMode = LineBreakMode.TailTruncation }, 0, 0);
+        footer.Add(expire, 1, 0);
+        return new Border
+        {
+            WidthRequest = 250,
+            MinimumHeightRequest = 160,
+            Margin = new Thickness(0, 0, 10, 10),
+            Padding = new Thickness(14),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = expired ? (Color)Application.Current.Resources["Line"] : (Color)Application.Current.Resources["LineStrong"],
+            StrokeThickness = 1,
+            Opacity = expired ? 0.55 : 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) },
+            Content = new VerticalStackLayout
+            {
+                Spacing = 9,
+                Children =
+                {
+                    new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto) }, Children = { new Label { Text = category, TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 10, FontAttributes = FontAttributes.Bold }, new Label { Text = stars, TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 10 } } },
+                    new Label { Text = text, TextColor = (Color)Application.Current.Resources["TextPrimary"], FontSize = 13, LineHeight = 1.55, LineBreakMode = LineBreakMode.WordWrap, MaxLines = 4 },
+                    new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"] },
+                    footer,
+                },
+            },
+        };
     }
 
     private View CreateGoalsView()
