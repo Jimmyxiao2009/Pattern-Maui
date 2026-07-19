@@ -1201,6 +1201,34 @@ public partial class MainPage : ContentPage
         var output = OutputEditor();
         var title = new Entry { Placeholder = "新任务", WidthRequest = 280 };
         var detail = new Entry { Placeholder = "任务详情", WidthRequest = 280 };
+        var taskList = new VerticalStackLayout { Spacing = 10 };
+        async Task RefreshTaskCardsAsync()
+        {
+            if (OperatingSystem.IsAndroid()) return;
+            try
+            {
+                StatusLabel.Text = "正在读取任务…";
+                var response = await _runtime.RequestAsync(new { type = "task.list" });
+                taskList.Children.Clear();
+                if (!response.TryGetProperty("tasks", out var tasks) || tasks.ValueKind != JsonValueKind.Array || tasks.GetArrayLength() == 0)
+                {
+                    taskList.Children.Add(new Label { Text = "还没有任务。创建一个任务或从聊天中交给 Pattern 执行。", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12, Margin = new Thickness(4, 18) });
+                    output.Text = Format(response);
+                    StatusLabel.Text = "任务列表为空";
+                    return;
+                }
+                foreach (var task in tasks.EnumerateArray()) taskList.Children.Add(CreateTaskCard(task, output, RefreshTaskCardsAsync));
+                output.Text = $"已加载 {tasks.GetArrayLength()} 个任务。";
+                StatusLabel.Text = $"已加载 {tasks.GetArrayLength()} 个任务";
+            }
+            catch (Exception error)
+            {
+                taskList.Children.Clear();
+                taskList.Children.Add(new Label { Text = "任务读取失败，请检查运行时连接。", TextColor = (Color)Application.Current!.Resources["Danger"], FontSize = 12, Margin = new Thickness(4, 18) });
+                output.Text = $"任务读取失败：{error.Message}";
+                StatusLabel.Text = "任务读取失败";
+            }
+        }
         var create = new Button { Text = "创建任务" };
         create.Clicked += async (_, _) =>
         {
@@ -1216,11 +1244,12 @@ public partial class MainPage : ContentPage
             await RequestToEditorAsync(new { type = "task.create", title = title.Text, detail = detail.Text ?? string.Empty }, output, "任务已创建");
             title.Text = string.Empty;
             detail.Text = string.Empty;
+            await RefreshTaskCardsAsync();
         };
         var list = new Button { Text = "刷新任务" };
         list.Clicked += async (_, _) =>
         {
-            if (!OperatingSystem.IsAndroid()) { await RequestToEditorAsync(new { type = "task.list" }, output); return; }
+            if (!OperatingSystem.IsAndroid()) { await RefreshTaskCardsAsync(); return; }
             await _relay.InitializeAsync();
             var incoming = _relay.DrainInbox().Where(item => item.Type == "task").ToArray();
             output.Text = JsonSerializer.Serialize(new { status = _relay.Status, incoming = incoming.Select(item => FormatRelayTask(item.Body)) }, JsonOptions);
@@ -1242,7 +1271,61 @@ public partial class MainPage : ContentPage
         recover.Clicked += async (_, _) => await ControlByPromptAsync("任务 ID", id => new { type = "task.recovery.rollback", taskId = id, assumeExclusive = false }, output);
         var delete = new Button { Text = "删除（按 ID）" };
         delete.Clicked += async (_, _) => await ControlByPromptAsync("任务 ID", id => new { type = "task.delete", taskId = id }, output);
-        return FeatureRoot("任务与执行", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { title, detail, create, list, run, cancel, pause, resume, approve, reject, recover, delete } } }, output);
+        var toolbar = new FlexLayout { Direction = FlexDirection.Row, Wrap = FlexWrap.Wrap, AlignItems = FlexAlignItems.Center, Children = { title, detail, create, list, run, cancel, pause, resume, approve, reject, recover, delete } };
+        _ = RefreshTaskCardsAsync();
+        return FeatureRoot("任务与执行", new VerticalStackLayout { Spacing = 14, Children = { toolbar, taskList } }, output);
+    }
+
+    private Border CreateTaskCard(JsonElement task, Editor output, Func<Task> refresh)
+    {
+        var id = task.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
+        var title = task.TryGetProperty("title", out var titleValue) ? titleValue.GetString() ?? "未命名任务" : "未命名任务";
+        var detail = task.TryGetProperty("detail", out var detailValue) ? detailValue.GetString() ?? string.Empty : string.Empty;
+        var status = task.TryGetProperty("status", out var statusValue) ? statusValue.GetString() ?? "queued" : "queued";
+        var statusLabel = status switch { "running" => "执行中", "awaiting_approval" => "待审批", "paused" => "已暂停", "done" => "已完成", "failed" => "失败", "cancelled" => "已取消", "scheduled" => "已排程", _ => "排队中" };
+        var statusColor = status switch { "done" => (Color)Application.Current!.Resources["Positive"], "failed" => (Color)Application.Current!.Resources["Danger"], "awaiting_approval" or "running" => (Color)Application.Current!.Resources["Accent"], _ => (Color)Application.Current!.Resources["TextMuted"] };
+        var actions = new HorizontalStackLayout { Spacing = 6 };
+        async Task ControlAsync(string action)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return;
+            try { output.Text = Format(await _runtime.RequestAsync(new { type = "task.control", taskId = id, action })); await refresh(); }
+            catch (Exception error) { output.Text = $"任务操作失败：{error.Message}"; }
+        }
+        if (status is "queued" or "paused") actions.Children.Add(new Button { Text = "运行", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("run")) });
+        if (status is "running" or "queued" or "awaiting_approval") actions.Children.Add(new Button { Text = "暂停", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("pause")) });
+        if (status == "awaiting_approval") actions.Children.Add(new Button { Text = "批准", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("approve")) });
+        if (status is "running" or "queued" or "paused" or "awaiting_approval") actions.Children.Add(new Button { Text = "终止", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("cancel")) });
+        var stepsText = string.Empty;
+        if (task.TryGetProperty("steps", out var steps) && steps.ValueKind == JsonValueKind.Array)
+        {
+            stepsText = string.Join("\n", steps.EnumerateArray().TakeLast(5).Reverse().Select(step =>
+            {
+                var stepStatus = step.TryGetProperty("status", out var stepStatusValue) ? stepStatusValue.GetString() ?? "pending" : "pending";
+                var stepDetail = step.TryGetProperty("detail", out var stepDetailValue) ? stepDetailValue.GetString() ?? "步骤" : "步骤";
+                var marker = stepStatus == "done" ? "✓" : stepStatus == "failed" ? "×" : stepStatus == "running" ? "›" : "·";
+                return $"{marker} {stepDetail}";
+            }));
+        }
+        var body = new VerticalStackLayout
+        {
+            Spacing = 7,
+            Children =
+            {
+                new Label { Text = title, FontSize = 15, FontAttributes = FontAttributes.Bold },
+                new Label { Text = detail, TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11, IsVisible = !string.IsNullOrWhiteSpace(detail) },
+                new Label { Text = string.IsNullOrWhiteSpace(stepsText) ? "还没有执行步骤" : stepsText, TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11, LineHeight = 1.5 },
+                actions,
+            },
+        };
+        return new Border
+        {
+            Padding = new Thickness(16, 13),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) },
+            Content = new Grid { RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto) }, RowSpacing = 8, Children = { new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = statusLabel, TextColor = statusColor, FontSize = 10, FontAttributes = FontAttributes.Bold }, new Label { Text = id.Length > 8 ? id[..8] : id, TextColor = (Color)Application.Current.Resources["TextFaint"], FontFamily = "Consolas", FontSize = 10 } } }, body } },
+        };
     }
 
     private View CreateProactiveView()
