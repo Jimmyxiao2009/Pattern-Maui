@@ -1113,15 +1113,43 @@ public partial class MainPage : ContentPage
     {
         var output = OutputEditor();
         var objective = new Entry { Placeholder = "新目标", WidthRequest = 320 };
+        var goalList = new VerticalStackLayout { Spacing = 10 };
+        async Task RefreshGoalsAsync()
+        {
+            try
+            {
+                StatusLabel.Text = "正在读取目标…";
+                var response = await _runtime.RequestAsync(new { type = "goal.list" });
+                goalList.Children.Clear();
+                if (!response.TryGetProperty("goals", out var goals) || goals.ValueKind != JsonValueKind.Array || goals.GetArrayLength() == 0)
+                {
+                    goalList.Children.Add(new Label { Text = "当前没有进行中的目标。用上方“创建目标”或聊天里的 /goal 开始。", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 12, Margin = new Thickness(4, 18) });
+                    output.Text = Format(response);
+                    StatusLabel.Text = "目标列表为空";
+                    return;
+                }
+                foreach (var goal in goals.EnumerateArray()) goalList.Children.Add(CreateGoalCard(goal, output, RefreshGoalsAsync));
+                output.Text = $"已加载 {goals.GetArrayLength()} 个目标。";
+                StatusLabel.Text = $"已加载 {goals.GetArrayLength()} 个目标";
+            }
+            catch (Exception error)
+            {
+                goalList.Children.Clear();
+                goalList.Children.Add(new Label { Text = "目标读取失败，请检查运行时连接。", TextColor = (Color)Application.Current!.Resources["Danger"], FontSize = 12, Margin = new Thickness(4, 18) });
+                output.Text = $"目标读取失败：{error.Message}";
+                StatusLabel.Text = "目标读取失败";
+            }
+        }
         var create = new Button { Text = "创建目标" };
         create.Clicked += async (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(objective.Text)) return;
             await RequestToEditorAsync(new { type = "goal.set", objective = objective.Text }, output, "目标已保存");
             objective.Text = string.Empty;
+            await RefreshGoalsAsync();
         };
         var list = new Button { Text = "刷新目标" };
-        list.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "goal.list" }, output);
+        list.Clicked += async (_, _) => await RefreshGoalsAsync();
         var pause = new Button { Text = "暂停目标（按 ID）" };
         pause.Clicked += async (_, _) => await ControlByPromptAsync("目标 ID", id => new { type = "goal.control", goalId = id, action = "pause" }, output);
         var resume = new Button { Text = "恢复目标（按 ID）" };
@@ -1130,7 +1158,42 @@ public partial class MainPage : ContentPage
         complete.Clicked += async (_, _) => await ControlByPromptAsync("目标 ID", id => new { type = "goal.control", goalId = id, action = "complete" }, output);
         var clear = new Button { Text = "清除目标（按 ID）" };
         clear.Clicked += async (_, _) => await ControlByPromptAsync("目标 ID", id => new { type = "goal.control", goalId = id, action = "clear" }, output);
-        return FeatureRoot("目标", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { objective, create, list, pause, resume, complete, clear } } }, output);
+        var toolbar = new FlexLayout { Direction = FlexDirection.Row, Wrap = FlexWrap.Wrap, AlignItems = FlexAlignItems.Center, Children = { objective, create, list, pause, resume, complete, clear } };
+        _ = RefreshGoalsAsync();
+        return FeatureRoot("目标", new VerticalStackLayout { Spacing = 14, Children = { toolbar, goalList } }, output);
+    }
+
+    private Border CreateGoalCard(JsonElement goal, Editor output, Func<Task> refresh)
+    {
+        var id = goal.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
+        var objective = goal.TryGetProperty("objective", out var objectiveValue) ? objectiveValue.GetString() ?? "未命名目标" : "未命名目标";
+        var status = goal.TryGetProperty("status", out var statusValue) ? statusValue.GetString() ?? "active" : "active";
+        var statusLabel = status switch { "paused" => "已暂停", "done" => "已完成", "blocked" => "已阻塞", "cleared" => "已清除", _ => "进行中" };
+        var statusColor = status switch { "done" => (Color)Application.Current!.Resources["Positive"], "paused" or "cleared" => (Color)Application.Current!.Resources["TextMuted"], _ => (Color)Application.Current!.Resources["Accent"] };
+        var progress = goal.TryGetProperty("progress", out var progressValue) && progressValue.ValueKind == JsonValueKind.Array
+            ? string.Join("\n", progressValue.EnumerateArray().Select(item => "· " + (item.GetString() ?? string.Empty)).TakeLast(5).Reverse())
+            : string.Empty;
+        var actions = new HorizontalStackLayout { Spacing = 6 };
+        async Task ControlAsync(string action)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return;
+            try { output.Text = Format(await _runtime.RequestAsync(new { type = "goal.control", goalId = id, action })); await refresh(); }
+            catch (Exception error) { output.Text = $"目标操作失败：{error.Message}"; }
+        }
+        if (status == "active" || status == "blocked") actions.Children.Add(new Button { Text = "暂停", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("pause")) });
+        if (status == "paused") actions.Children.Add(new Button { Text = "恢复", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("resume")) });
+        if (status is "active" or "paused" or "blocked") actions.Children.Add(new Button { Text = "标记完成", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("complete")) });
+        if (status is not "done" and not "cleared") actions.Children.Add(new Button { Text = "清除", FontSize = 10, Padding = new Thickness(8, 4), Command = new Command(async () => await ControlAsync("clear")) });
+        var body = new VerticalStackLayout { Spacing = 8, Children = { new Label { Text = objective, FontSize = 15, FontAttributes = FontAttributes.Bold }, new Label { Text = string.IsNullOrWhiteSpace(progress) ? "还没有进度回执" : progress, TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11, LineHeight = 1.5 }, actions } };
+        return new Border
+        {
+            Padding = new Thickness(16, 13),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(7) },
+            Content = new Grid { RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto) }, RowSpacing = 7, Children = { new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = statusLabel, TextColor = statusColor, FontSize = 10, FontAttributes = FontAttributes.Bold }, new Label { Text = id.Length > 8 ? id[..8] : id, TextColor = (Color)Application.Current.Resources["TextFaint"], FontFamily = "Consolas", FontSize = 10 } } }, body } },
+        };
     }
 
     private View CreateTasksView()
