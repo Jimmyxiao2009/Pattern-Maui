@@ -738,8 +738,8 @@ public partial class MainPage : ContentPage
         var output = OutputEditor();
         var preview = OutputEditor();
         preview.Placeholder = "选择文件后显示文本预览（最多 120 KB）";
-        var path = new Entry { Placeholder = "工作区绝对路径", WidthRequest = 360 };
-        var name = new Entry { Placeholder = "项目名", WidthRequest = 160 };
+        var path = new Entry { Placeholder = "工作区绝对路径" };
+        var name = new Entry { Placeholder = "项目名" };
         var tree = new CollectionView
         {
             SelectionMode = SelectionMode.Single,
@@ -794,14 +794,105 @@ public partial class MainPage : ContentPage
         diff.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "workspace.diff", root = path.Text }, output);
         var worktree = new Button { Text = "创建 Worktree" };
         worktree.Clicked += async (_, _) => await RequestToEditorAsync(new { type = "workspace.worktree.create", root = path.Text, name = name.Text }, output);
-        var actions = new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { path, name, list, sync, diff, worktree } } };
-        var content = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition { Height = new GridLength(280) }, new RowDefinition { Height = GridLength.Star } }, RowSpacing = 8 };
-        content.Add(tree, 0, 0);
-        content.Add(preview, 0, 1);
-        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star) }, RowSpacing = 12 };
-        root.Add(new Label { Text = "项目工作区", FontSize = 24, FontAttributes = FontAttributes.Bold }, 0, 0);
-        root.Add(actions, 0, 1);
-        root.Add(content, 0, 2);
+        var projectControls = new VerticalStackLayout
+        {
+            Spacing = 9,
+            Children =
+            {
+                new Label { Text = "项目", TextColor = (Color)Application.Current!.Resources["Accent"], FontSize = 10, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "工作区上下文", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                name,
+                path,
+                list,
+                sync,
+                new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"], Margin = new Thickness(0, 5) },
+                new Label { Text = "Git 操作", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                diff,
+                worktree,
+            },
+        };
+        var sidebar = new Border
+        {
+            Padding = new Thickness(14),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = new ScrollView { Content = projectControls },
+        };
+        var treePanel = new Border
+        {
+            Padding = new Thickness(12),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = new Grid
+            {
+                RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Star) },
+                RowSpacing = 9,
+                Children =
+                {
+                    new Label { Text = "文件树", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                    tree,
+                },
+            },
+        };
+        Grid.SetRow(tree, 1);
+        var previewPanel = new Border
+        {
+            Padding = new Thickness(12),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = new Grid
+            {
+                RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Star) },
+                RowSpacing = 9,
+                Children =
+                {
+                    new Label { Text = "文件预览", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                    preview,
+                },
+            },
+        };
+        Grid.SetRow(preview, 1);
+        var workspace = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitionCollection { new(new GridLength(220)), new(new GridLength(260)), new(GridLength.Star) },
+            RowDefinitions = new RowDefinitionCollection { new(GridLength.Star), new(new GridLength(130)) },
+            ColumnSpacing = 10,
+            RowSpacing = 10,
+        };
+        workspace.Add(sidebar, 0, 0);
+        workspace.Add(treePanel, 1, 0);
+        workspace.Add(previewPanel, 2, 0);
+        var outputPanel = new Border
+        {
+            Padding = new Thickness(10, 6),
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = output,
+        };
+        Grid.SetColumnSpan(outputPanel, 3);
+        Grid.SetRow(outputPanel, 1);
+        workspace.Add(outputPanel);
+        var root = new Grid
+        {
+            Padding = new Thickness(42, 26, 42, 30),
+            RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Star) },
+            RowSpacing = 14,
+            BackgroundColor = (Color)Application.Current.Resources["SurfaceBackground"],
+            Children =
+            {
+                new VerticalStackLayout { Spacing = 3, Children = { new Label { Text = "PROJECT WORKSPACE", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 10, FontAttributes = FontAttributes.Bold }, new Label { Text = "项目工作区", FontSize = 24, FontAttributes = FontAttributes.Bold } } },
+                workspace,
+            },
+        };
+        Grid.SetRow(workspace, 1);
         return root;
     }
 
