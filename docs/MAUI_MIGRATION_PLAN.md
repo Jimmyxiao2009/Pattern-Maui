@@ -1,5 +1,7 @@
 # Pattern → .NET MAUI 移植计划
 
+界面逐页一比一还原的执行清单见 [MAUI_UI_MIGRATION_PLAN.md](MAUI_UI_MIGRATION_PLAN.md)。本文保留平台能力、sidecar 和数据层的迁移边界。
+
 ## 目标与边界
 
 把归档的 Tauri/Svelte 桌面端和移动端能力迁移到一个 .NET MAUI 客户端，目标平台为 Windows、Android 和 macOS Catalyst。Node sidecar 保留为跨平台 Agent 运行时；Windows/macOS 由 MAUI 直接托管，Android 采用 WebDAV relay 瘦客户端，不在 APK 内嵌 Node。

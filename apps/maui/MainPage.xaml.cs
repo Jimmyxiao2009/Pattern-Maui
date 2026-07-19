@@ -28,7 +28,8 @@ public partial class MainPage : ContentPage
     private readonly List<string> _attachedPaths = [];
     private readonly List<ConversationSession> _sessions = [];
     private readonly Dictionary<string, View> _views = [];
-    private Label? _conversationLabel;
+    private readonly Dictionary<string, Button> _navigationButtons = [];
+    private VerticalStackLayout? _conversationStack;
     private Entry? _messageEntry;
     private Button? _cancelButton;
     private Button? _attachButton;
@@ -36,6 +37,7 @@ public partial class MainPage : ContentPage
     private string _activeSessionId = "default";
     private string _conversation = "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。";
     private string _activeAssistantText = string.Empty;
+    private string _chatError = string.Empty;
     private bool _loaded;
 
     public MainPage(SidecarRuntime runtime, AppSettingsStore settings, RelayService relay, NativeBridgeService bridge, SingleInstanceService instance, GlobalHotkeyService hotkey, WindowsTrayService tray, AutostartService autostart)
@@ -69,9 +71,28 @@ public partial class MainPage : ContentPage
 
         foreach (var (id, label) in NavigationItems)
         {
-            var button = new Button { Text = label, Padding = new Thickness(13, 6), FontSize = 13, CornerRadius = 10 };
+            var button = new Button
+            {
+                Text = label,
+                WidthRequest = 56,
+                HeightRequest = 52,
+                Padding = new Thickness(2, 3),
+                FontSize = 10,
+                TextColor = (Color)Application.Current!.Resources["TextFaint"],
+                BackgroundColor = Colors.Transparent,
+                BorderWidth = 0,
+                CornerRadius = 6,
+                ImageSource = new FontImageSource
+                {
+                    Glyph = NavigationGlyph(id),
+                    FontFamily = "Segoe MDL2 Assets",
+                    Size = 17,
+                    Color = (Color)Application.Current.Resources["TextFaint"],
+                },
+            };
             button.Clicked += (_, _) => ShowView(id);
             NavigationBar.Children.Add(button);
+            _navigationButtons[id] = button;
         }
 
         _runtime.StatusChanged += status => MainThread.BeginInvokeOnMainThread(() => StatusLabel.Text = status);
@@ -93,15 +114,17 @@ public partial class MainPage : ContentPage
         {
             _activeAssistantText += delta;
             _conversation += delta;
-            if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+            RefreshConversationView();
         });
         _runtime.ChatDone += () => MainThread.BeginInvokeOnMainThread(() =>
         {
             if (!string.IsNullOrWhiteSpace(_activeAssistantText)) _history.Add(new ChatTurn("assistant", _activeAssistantText));
             _activeAssistantText = string.Empty;
+            _chatError = string.Empty;
             _activeChatId = null;
             if (_cancelButton is not null) _cancelButton.IsEnabled = false;
             StatusLabel.Text = "运行时已连接";
+            RefreshConversationView();
             SaveHistory();
         });
         _runtime.ChatCancelled += () => MainThread.BeginInvokeOnMainThread(() =>
@@ -109,14 +132,16 @@ public partial class MainPage : ContentPage
             _activeChatId = null;
             if (_cancelButton is not null) _cancelButton.IsEnabled = false;
             StatusLabel.Text = "回复已取消";
+            RefreshConversationView();
         });
         _runtime.ChatError += error => MainThread.BeginInvokeOnMainThread(() =>
         {
             _conversation += $"\n[回复失败：{error}]";
-            if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+            _chatError = error;
             _activeChatId = null;
             if (_cancelButton is not null) _cancelButton.IsEnabled = false;
             StatusLabel.Text = "回复失败，运行时仍保持连接";
+            RefreshConversationView();
         });
         Loaded += async (_, _) =>
         {
@@ -177,10 +202,11 @@ public partial class MainPage : ContentPage
         _activeSessionId = session.Id;
         _history.Clear();
         _history.AddRange(session.Messages.TakeLast(100));
+        _chatError = string.Empty;
         _conversation = _history.Count == 0
             ? "欢迎回来。Pattern 现在由 .NET MAUI 驱动，Agent 通过本地 stdio sidecar 运行。"
             : string.Join("\n\n", _history.Select(turn => turn.Role == "user" ? $"你：{turn.Content}" : $"Pattern：{turn.Content}"));
-        if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+        RefreshConversationView();
         if (persist) SaveHistory();
     }
 
@@ -234,18 +260,38 @@ public partial class MainPage : ContentPage
             _views[id] = view;
         }
         ContentHost.Content = view;
+        ViewTitleLabel.Text = NavigationItems.FirstOrDefault(item => item.Id == id).Label ?? "工作区";
+        foreach (var (itemId, button) in _navigationButtons)
+        {
+            var active = itemId == id;
+            button.BackgroundColor = active
+                ? (Color)Application.Current!.Resources["AccentWash"]
+                : Colors.Transparent;
+            button.TextColor = active
+                ? (Color)Application.Current!.Resources["Accent"]
+                : (Color)Application.Current!.Resources["TextFaint"];
+            if (button.ImageSource is FontImageSource icon)
+            {
+                icon.Color = button.TextColor;
+            }
+        }
     }
 
     private View CreateChatView()
     {
-        _conversationLabel = new Label { Text = _conversation, FontSize = 16, LineBreakMode = LineBreakMode.WordWrap };
-        var transcript = new Border
+        _conversationStack = new VerticalStackLayout { Spacing = 22 };
+        RefreshConversationView();
+        var transcript = new ScrollView
         {
-            BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"],
-            StrokeThickness = 0,
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(14) },
-            Padding = 18,
-            Content = new ScrollView { Content = _conversationLabel },
+            Padding = new Thickness(42, 10),
+            Content = new Border
+            {
+                MaximumWidthRequest = 820,
+                HorizontalOptions = LayoutOptions.Center,
+                StrokeThickness = 0,
+                BackgroundColor = Colors.Transparent,
+                Content = _conversationStack,
+            },
         };
         _messageEntry = new Entry { Placeholder = "给 Pattern 发消息", ReturnType = ReturnType.Send };
         _messageEntry.Completed += async (_, _) => await SendAsync();
@@ -265,7 +311,17 @@ public partial class MainPage : ContentPage
             }
             catch (Exception error) { StatusLabel.Text = $"选择附件失败：{error.Message}"; }
         };
-        var send = new Button { Text = "发送", BackgroundColor = (Color)Application.Current!.Resources["Accent"], TextColor = (Color)Application.Current!.Resources["PageBackground"] };
+        var send = new Button
+        {
+            Text = "发送",
+            BackgroundColor = (Color)Application.Current!.Resources["Accent"],
+            BorderColor = (Color)Application.Current!.Resources["Accent"],
+            TextColor = (Color)Application.Current!.Resources["PageBackground"],
+            FontAttributes = FontAttributes.Bold,
+            BorderWidth = 1,
+            CornerRadius = 6,
+            Padding = new Thickness(12, 7),
+        };
         send.Clicked += async (_, _) => await SendAsync();
         _cancelButton = new Button { Text = "停止", IsEnabled = false };
         _cancelButton.Clicked += async (_, _) =>
@@ -273,19 +329,137 @@ public partial class MainPage : ContentPage
             if (_activeChatId is null) return;
             await _runtime.CancelChatAsync(_activeChatId);
         };
-        var composer = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto) }, ColumnSpacing = 8 };
-        composer.Add(_messageEntry, 0, 0);
-        composer.Add(attach, 1, 0);
-        composer.Add(send, 2, 0);
-        composer.Add(_cancelButton, 3, 0);
-        Grid.SetRow(composer, 1);
+        var composerGrid = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto) }, ColumnSpacing = 8 };
+        composerGrid.Add(_messageEntry, 0, 0);
+        composerGrid.Add(attach, 1, 0);
+        composerGrid.Add(send, 2, 0);
+        composerGrid.Add(_cancelButton, 3, 0);
+        var composer = new Border
+        {
+            Margin = new Thickness(28, 8, 28, 16),
+            Padding = new Thickness(12, 10),
+            BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current!.Resources["LineStrong"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = composerGrid,
+        };
+        Grid.SetRow(composer, 2);
+        var heading = new VerticalStackLayout
+        {
+            Padding = new Thickness(42, 26, 42, 4),
+            Spacing = 3,
+            Children =
+            {
+                new Label { Text = "对话", FontSize = 24, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "保持连续上下文，或用快捷键 Ctrl+Alt+P 随时叫醒 Pattern", TextColor = (Color)Application.Current!.Resources["TextMuted"], FontSize = 11 },
+            },
+        };
+        Grid.SetRow(heading, 0);
+        Grid.SetRow(transcript, 1);
         return new Grid
         {
-            RowDefinitions = new RowDefinitionCollection { new(GridLength.Star), new(GridLength.Auto) },
-            RowSpacing = 14,
-            Children = { transcript, composer },
+            RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto) },
+            Children = { heading, transcript, composer },
         };
     }
+
+    private void RefreshConversationView()
+    {
+        if (_conversationStack is null) return;
+        _conversationStack.Children.Clear();
+        if (_history.Count == 0 && string.IsNullOrWhiteSpace(_activeAssistantText))
+        {
+            _conversationStack.Children.Add(CreateMessageBubble("Pattern", _conversation, isUser: false));
+        }
+        else
+        {
+            foreach (var turn in _history)
+            {
+                _conversationStack.Children.Add(CreateMessageBubble(turn.Role == "user" ? "你" : "Pattern", turn.Content, turn.Role == "user"));
+            }
+            if (!string.IsNullOrWhiteSpace(_activeAssistantText))
+            {
+                _conversationStack.Children.Add(CreateMessageBubble("Pattern", _activeAssistantText, isUser: false));
+            }
+        }
+        if (_activeChatId is not null)
+        {
+            _conversationStack.Children.Add(new Label
+            {
+                Text = "Pattern 正在思考…",
+                TextColor = (Color)Application.Current!.Resources["TextMuted"],
+                FontSize = 11,
+                Margin = new Thickness(15, -12, 0, 0),
+            });
+        }
+        if (!string.IsNullOrWhiteSpace(_chatError))
+        {
+            _conversationStack.Children.Add(new Border
+            {
+                Padding = new Thickness(12, 9),
+                BackgroundColor = (Color)Application.Current!.Resources["AccentWash"],
+                Stroke = (Color)Application.Current!.Resources["AccentLine"],
+                StrokeThickness = 1,
+                StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) },
+                Content = new Label { Text = $"回复失败：{_chatError}", TextColor = (Color)Application.Current!.Resources["Accent"], FontSize = 11 },
+            });
+        }
+    }
+
+    private static Border CreateMessageBubble(string speaker, string text, bool isUser)
+    {
+        var meta = new HorizontalStackLayout
+        {
+            Spacing = 8,
+            Children =
+            {
+                new Label { Text = speaker, FontSize = 11, FontAttributes = FontAttributes.Bold, TextColor = isUser ? (Color)Application.Current!.Resources["TextPrimary"] : (Color)Application.Current!.Resources["Accent"] },
+                new Label { Text = DateTime.Now.ToString("HH:mm"), FontFamily = "Consolas", FontSize = 10, TextColor = (Color)Application.Current!.Resources["TextFaint"] },
+            },
+        };
+        var body = new Label
+        {
+            Text = text,
+            FontSize = 14,
+            LineHeight = 1.8,
+            LineBreakMode = LineBreakMode.WordWrap,
+            TextColor = (Color)Application.Current!.Resources["TextPrimary"],
+        };
+        var copy = new VerticalStackLayout { Spacing = 5, Children = { meta, body } };
+        return new Border
+        {
+            MaximumWidthRequest = 620,
+            HorizontalOptions = isUser ? LayoutOptions.End : LayoutOptions.Start,
+            Padding = isUser ? new Thickness(14, 10) : new Thickness(0),
+            BackgroundColor = isUser ? (Color)Application.Current!.Resources["PanelBackground"] : Colors.Transparent,
+            Stroke = isUser ? (Color)Application.Current!.Resources["Line"] : Colors.Transparent,
+            StrokeThickness = isUser ? 1 : 0,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8, 8, 2, 8) },
+            Content = copy,
+        };
+    }
+
+    private static string NavigationGlyph(string id) => id switch
+    {
+        "oobe" => "\uE713",
+        "chat" => "\uE8BD",
+        "project" => "\uE8B7",
+        "conversations" => "\uE8A5",
+        "memory" => "\uE946",
+        "goals" => "\uE944",
+        "tasks" => "\uE9D5",
+        "proactive" => "\uE7F4",
+        "skills" => "\uE8F1",
+        "workflows" => "\uE9D2",
+        "mcp" => "\uE90F",
+        "channels" => "\uE715",
+        "models" => "\uE950",
+        "filewatch" => "\uE8B7",
+        "audit" => "\uE9D9",
+        "settings" => "\uE713",
+        _ => "\uE7C3",
+    };
 
     private View CreateFeatureView(string id) => id switch
     {
@@ -347,7 +521,7 @@ public partial class MainPage : ContentPage
         AutoSize = EditorAutoSizeOption.TextChanges,
         MinimumHeightRequest = 180,
         BackgroundColor = (Color)Application.Current!.Resources["PanelBackground"],
-        TextColor = Colors.White,
+        TextColor = (Color)Application.Current!.Resources["TextPrimary"],
         FontFamily = DeviceInfo.Platform == DevicePlatform.WinUI ? "Consolas" : null,
     };
 
@@ -409,7 +583,7 @@ public partial class MainPage : ContentPage
             _conversation += $"\n\n中继消息：{body}";
             _history.Add(new ChatTurn("assistant", body));
         }
-        if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+        RefreshConversationView();
         SaveHistory();
         StatusLabel.Text = $"收到 {incoming.Length} 条中继消息";
     }
@@ -439,10 +613,36 @@ public partial class MainPage : ContentPage
 
     private static Grid FeatureRoot(string title, View actions, Editor output)
     {
-        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star) }, RowSpacing = 12 };
-        root.Add(new Label { Text = title, FontSize = 24, FontAttributes = FontAttributes.Bold }, 0, 0);
-        root.Add(new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = actions }, 0, 1);
-        root.Add(new ScrollView { Content = output }, 0, 2);
+        var root = new Grid
+        {
+            Padding = new Thickness(42, 26, 42, 30),
+            RowDefinitions = new RowDefinitionCollection { new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star) },
+            RowSpacing = 14,
+            BackgroundColor = (Color)Application.Current!.Resources["SurfaceBackground"],
+        };
+        root.Add(new VerticalStackLayout
+        {
+            Spacing = 3,
+            Children =
+            {
+                new Label { Text = "WORKSPACE", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 10, FontAttributes = FontAttributes.Bold },
+                new Label { Text = title, FontSize = 24, FontAttributes = FontAttributes.Bold },
+            },
+        }, 0, 0);
+        root.Add(new ScrollView
+        {
+            Orientation = ScrollOrientation.Vertical,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Never,
+            Content = actions,
+        }, 0, 1);
+        root.Add(new Border
+        {
+            BackgroundColor = (Color)Application.Current.Resources["PanelBackground"],
+            Stroke = (Color)Application.Current.Resources["Line"],
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(8) },
+            Content = new ScrollView { Content = output },
+        }, 0, 2);
         return root;
     }
 
@@ -597,7 +797,7 @@ public partial class MainPage : ContentPage
         {
             _history.Clear();
             _conversation = "会话已清空。";
-            if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+            RefreshConversationView();
             SaveHistory();
             output.Text = "已清空本地会话历史";
         };
@@ -1124,8 +1324,47 @@ public partial class MainPage : ContentPage
                 ? (enabled ? $"Windows 开机启动已{(_autostart.IsEnabled ? "启用" : "停用")}" : "开机启动设置失败")
                 : "当前平台不支持由 Pattern 管理开机启动。";
         };
-        var backupHint = new Label { Text = "备份包含配置与会话，不包含 API Key/Relay 密钥", FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center };
-        return FeatureRoot("设置与运行时", new ScrollView { Orientation = ScrollOrientation.Horizontal, Content = new HorizontalStackLayout { Spacing = 8, Children = { provider, endpoint, model, user, key, save, ping, health, setHealth, cron, setCron, exportBackup, importBackup, exportData, importData, autostart, backupHint } } }, output);
+        var backupHint = new Label { Text = "备份包含配置与会话，不包含 API Key/Relay 密钥", FontSize = 11, TextColor = (Color)Application.Current!.Resources["TextMuted"], VerticalTextAlignment = TextAlignment.Center };
+        var connectionSection = new VerticalStackLayout
+        {
+            Spacing = 8,
+            Children =
+            {
+                new Label { Text = "常规连接", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new Label { Text = "模型服务和身份信息", TextColor = (Color)Application.Current.Resources["TextMuted"], FontSize = 11 },
+                provider,
+                endpoint,
+                model,
+                user,
+                key,
+                save,
+            },
+        };
+        var runtimeSection = new VerticalStackLayout
+        {
+            Spacing = 8,
+            Children =
+            {
+                new Label { Text = "运行时", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new HorizontalStackLayout { Spacing = 8, Children = { ping, health, setHealth, cron, setCron } },
+            },
+        };
+        var backupSection = new VerticalStackLayout
+        {
+            Spacing = 8,
+            Children =
+            {
+                new Label { Text = "数据与系统", TextColor = (Color)Application.Current.Resources["Accent"], FontSize = 11, FontAttributes = FontAttributes.Bold },
+                new HorizontalStackLayout { Spacing = 8, Children = { exportBackup, importBackup, exportData, importData, autostart } },
+                backupHint,
+            },
+        };
+        var actions = new VerticalStackLayout
+        {
+            Spacing = 18,
+            Children = { connectionSection, new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"] }, runtimeSection, new BoxView { HeightRequest = 1, Color = (Color)Application.Current.Resources["Line"] }, backupSection },
+        };
+        return FeatureRoot("设置与运行时", actions, output);
     }
 
     private async Task ExportBackupAsync(Editor output)
@@ -1281,8 +1520,9 @@ public partial class MainPage : ContentPage
         _messageEntry!.Text = string.Empty;
         var priorHistory = _history.ToArray();
         _activeAssistantText = string.Empty;
+        _chatError = string.Empty;
         _conversation += $"\n\n你：{text}\nPattern：";
-        if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+        RefreshConversationView();
         try
         {
             if (OperatingSystem.IsAndroid())
@@ -1306,7 +1546,8 @@ public partial class MainPage : ContentPage
         catch (Exception error)
         {
             _conversation += $"\n[发送失败：{error.Message}]";
-            if (_conversationLabel is not null) _conversationLabel.Text = _conversation;
+            _chatError = error.Message;
+            RefreshConversationView();
         }
     }
 

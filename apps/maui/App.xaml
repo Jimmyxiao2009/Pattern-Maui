@@ -4,16 +4,29 @@
              x:Class="Pattern.Maui.App">
     <Application.Resources>
         <ResourceDictionary>
-            <Color x:Key="PageBackground">#101827</Color>
-            <Color x:Key="PanelBackground">#192235</Color>
-            <Color x:Key="Accent">#8AB4F8</Color>
+            <Color x:Key="PageBackground">#0E0D10</Color>
+            <Color x:Key="SurfaceBackground">#151419</Color>
+            <Color x:Key="PanelBackground">#1B1A20</Color>
+            <Color x:Key="ElevatedBackground">#242229</Color>
+            <Color x:Key="Line">#2A292E</Color>
+            <Color x:Key="LineStrong">#414047</Color>
+            <Color x:Key="TextPrimary">#EBE8E2</Color>
+            <Color x:Key="TextMuted">#96919C</Color>
+            <Color x:Key="TextFaint">#625F69</Color>
+            <Color x:Key="Accent">#E7A23B</Color>
+            <Color x:Key="AccentHigh">#F1B95D</Color>
+            <Color x:Key="AccentWash">#302916</Color>
+            <Color x:Key="AccentLine">#6B4C20</Color>
+            <Color x:Key="Positive">#4DB380</Color>
+            <Color x:Key="Info">#70A3DC</Color>
+            <Color x:Key="Danger">#E05B50</Color>
             <Style TargetType="Label">
-                <Setter Property="TextColor" Value="#E8EDF7" />
+                <Setter Property="TextColor" Value="#EBE8E2" />
             </Style>
             <Style TargetType="Entry">
-                <Setter Property="TextColor" Value="#F8FAFC" />
-                <Setter Property="PlaceholderColor" Value="#9BA8BD" />
-                <Setter Property="BackgroundColor" Value="#253149" />
+                <Setter Property="TextColor" Value="#EBE8E2" />
+                <Setter Property="PlaceholderColor" Value="#625F69" />
+                <Setter Property="BackgroundColor" Value="#1B1A20" />
             </Style>
         </ResourceDictionary>
     </Application.Resources>
