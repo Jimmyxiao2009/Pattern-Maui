@@ -43,5 +43,9 @@
                 <Label Grid.Column="3" Text="PATTERN · 0.4.0" TextColor="{StaticResource TextFaint}" FontFamily="Consolas" FontSize="10" VerticalTextAlignment="Center" />
             </Grid>
         </Border>
+
+        <!-- Quick Window overlay: the Windows hotkey opens the same compact
+             companion surface as the old Tauri QuickWindow route. -->
+        <ContentView x:Name="QuickWindowHost" Grid.RowSpan="3" IsVisible="False" ZIndex="20" HorizontalOptions="Center" VerticalOptions="Start" Margin="0,58,0,0" />
     </Grid>
 </ContentPage>

@@ -57,7 +57,7 @@ public partial class MainPage : ContentPage
 
         _hotkey.QuickChatRequested += () => MainThread.BeginInvokeOnMainThread(() =>
         {
-            ShowView("chat");
+            ShowQuickWindow();
             StatusLabel.Text = "快捷窗口已打开（Ctrl+Alt+P）";
         });
         _tray.ShowRequested += () => MainThread.BeginInvokeOnMainThread(() => ShowView("chat"));
@@ -204,6 +204,13 @@ public partial class MainPage : ContentPage
     }
 
     private void OnReconnectClicked(object? sender, EventArgs e) => _ = ConnectAsync();
+
+    private void ShowQuickWindow()
+    {
+        if (QuickWindowHost.Content is null)
+            QuickWindowHost.Content = QuickWindowView.Create(_runtime, () => QuickWindowHost.IsVisible = false);
+        QuickWindowHost.IsVisible = true;
+    }
 
     private void ShowView(string id)
     {
